@@ -19,6 +19,7 @@ public class PluginConfiguration : BasePluginConfiguration
         LinkLanguage = "es";
         MinVotes = 50;
         SetCriticRating = false;
+        SyncMode = SyncMode.OnlyNewAndUnmatched;
         ThrottleMs = 3000;
         RequestTimeoutSeconds = 20;
         UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -63,6 +64,11 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Gets or sets a value indicating whether to also populate Jellyfin's <c>CriticRating</c> field (FilmAffinity rating * 10).
     /// </summary>
     public bool SetCriticRating { get; set; }
+
+    /// <summary>
+    /// Gets or sets which items the scheduled sync task processes (<see cref="Configuration.SyncMode.OnlyNewAndUnmatched"/> or <see cref="Configuration.SyncMode.RefreshAll"/>).
+    /// </summary>
+    public SyncMode SyncMode { get; set; }
 
     /// <summary>
     /// Gets or sets the minimum delay in milliseconds between consecutive score endpoint requests.

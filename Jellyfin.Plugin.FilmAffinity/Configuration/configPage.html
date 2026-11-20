@@ -64,6 +64,15 @@
                         <div class="fieldDescription">In addition to CommunityRating (0-10 stars), also write the score on a 0-100 scale to CriticRating.</div>
                     </div>
 
+                    <div class="selectContainer">
+                        <label class="selectLabel" for="SyncMode">Scheduled Sync Mode</label>
+                        <select is="emby-select" id="SyncMode" name="SyncMode" class="emby-select-withcolor emby-select">
+                            <option value="OnlyNewAndUnmatched">Only newly added / unmatched items (recommended)</option>
+                            <option value="RefreshAll">Refresh all items in enabled libraries</option>
+                        </select>
+                        <div class="fieldDescription">Choose whether the scheduled task skips items that already have a FilmAffinity ID or refreshes all items.</div>
+                    </div>
+
                     <div class="inputContainer">
                         <label class="inputLabel inputLabelUnfocused" for="ThrottleMs">Request Throttle (ms)</label>
                         <input id="ThrottleMs" name="ThrottleMs" type="number" is="emby-input" min="0" />
@@ -106,6 +115,7 @@
                         document.querySelector('#LinkLanguage').value = config.LinkLanguage || 'es';
                         document.querySelector('#MinVotes').value = config.MinVotes ?? 50;
                         document.querySelector('#SetCriticRating').checked = Boolean(config.SetCriticRating);
+                        document.querySelector('#SyncMode').value = config.SyncMode || 'OnlyNewAndUnmatched';
                         document.querySelector('#ThrottleMs').value = config.ThrottleMs ?? 3000;
                         document.querySelector('#RequestTimeoutSeconds').value = config.RequestTimeoutSeconds ?? 20;
                         document.querySelector('#UserAgent').value = config.UserAgent || '';
@@ -124,6 +134,7 @@
                         config.LinkLanguage = document.querySelector('#LinkLanguage').value;
                         config.MinVotes = parseInt(document.querySelector('#MinVotes').value, 10) || 0;
                         config.SetCriticRating = document.querySelector('#SetCriticRating').checked;
+                        config.SyncMode = document.querySelector('#SyncMode').value;
                         config.ThrottleMs = parseInt(document.querySelector('#ThrottleMs').value, 10) || 0;
                         config.RequestTimeoutSeconds = parseInt(document.querySelector('#RequestTimeoutSeconds').value, 10) || 20;
                         config.UserAgent = document.querySelector('#UserAgent').value.trim();

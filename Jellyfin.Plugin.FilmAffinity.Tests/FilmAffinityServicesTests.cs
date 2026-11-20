@@ -260,6 +260,60 @@ public class FilmAffinityServicesTests
         Assert.Equal(2, attempts);
     }
 
+    [Fact]
+    public async Task ScoreClient_Http429Exhausted_ReturnsRateLimitedTrue()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var cacheService = new FilmAffinityCacheService(cache);
+        var attempts = 0;
+
+        using var handler = new StubHttpMessageHandler(_ =>
+        {
+            attempts++;
+            var rateLimited = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+            rateLimited.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromMilliseconds(10));
+            return rateLimited;
+        });
+
+        var config = new PluginConfiguration
+        {
+            ScoreEndpointUrl = "http://scores.local/score/{id}",
+            MinVotes = 50,
+            ThrottleMs = 0
+        };
+
+        using var client = new FilmAffinityScoreClient(
+            new StubHttpClientFactory(handler),
+            cacheService,
+            NullLogger<FilmAffinityScoreClient>.Instance,
+            () => config);
+
+        var result = await client.FetchScoreAsync("144113", 2015, CancellationToken.None);
+
+        Assert.Null(result.Score);
+        Assert.True(result.RateLimited);
+        Assert.Equal(3, attempts);
+    }
+
+    [Fact]
+    public void SyncTask_ShouldProcessItem_RespectsSyncMode()
+    {
+        var matched = new Dictionary<string, string>
+        {
+            [Plugin.ProviderKey] = "809297",
+            ["Imdb"] = "tt0068646"
+        };
+        var unmatched = new Dictionary<string, string>
+        {
+            ["Imdb"] = "tt0068646"
+        };
+
+        Assert.False(FilmAffinitySyncTask.ShouldProcessItem(matched, SyncMode.OnlyNewAndUnmatched));
+        Assert.True(FilmAffinitySyncTask.ShouldProcessItem(unmatched, SyncMode.OnlyNewAndUnmatched));
+        Assert.True(FilmAffinitySyncTask.ShouldProcessItem(matched, SyncMode.RefreshAll));
+        Assert.True(FilmAffinitySyncTask.ShouldProcessItem(unmatched, SyncMode.RefreshAll));
+    }
+
     private sealed class StubHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> responder) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)

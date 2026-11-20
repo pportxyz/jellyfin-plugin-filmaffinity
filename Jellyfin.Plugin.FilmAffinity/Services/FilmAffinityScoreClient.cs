@@ -74,16 +74,34 @@ public sealed class FilmAffinityScoreClient : IDisposable
         int? productionYear,
         CancellationToken cancellationToken)
     {
+        var result = await FetchScoreAsync(filmAffinityId, productionYear, cancellationToken)
+            .ConfigureAwait(false);
+        return result.Score;
+    }
+
+    /// <summary>
+    /// Fetches a FilmAffinity score along with rate-limit status for the specified FilmAffinity ID.
+    /// </summary>
+    /// <param name="filmAffinityId">The numeric FilmAffinity ID.</param>
+    /// <param name="productionYear">Optional production year (used to tune cache TTL).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A <see cref="FilmAffinityFetchResult"/> indicating the parsed score and whether HTTP 429 exhausted retries.</returns>
+    public async Task<FilmAffinityFetchResult> FetchScoreAsync(
+        string filmAffinityId,
+        int? productionYear,
+        CancellationToken cancellationToken)
+    {
         if (string.IsNullOrWhiteSpace(filmAffinityId))
         {
-            return null;
+            return new FilmAffinityFetchResult(null, RateLimited: false);
         }
 
         var config = _configurationProvider();
 
         if (_cache.TryGetScore(filmAffinityId, out var cachedScore) && cachedScore is not null)
         {
-            return MeetsMinVotes(cachedScore, config.MinVotes) ? cachedScore : null;
+            var validCached = MeetsMinVotes(cachedScore, config.MinVotes) ? cachedScore : null;
+            return new FilmAffinityFetchResult(validCached, RateLimited: false);
         }
 
         Uri requestUri;
@@ -100,7 +118,7 @@ public sealed class FilmAffinityScoreClient : IDisposable
                 ex,
                 "Invalid FilmAffinity ScoreEndpointUrl configured: {EndpointUrl}",
                 config.ScoreEndpointUrl);
-            return null;
+            return new FilmAffinityFetchResult(null, RateLimited: false);
         }
 
         for (var attempt = 0; attempt <= MaxRateLimitRetries; attempt++)
@@ -150,7 +168,7 @@ public sealed class FilmAffinityScoreClient : IDisposable
                         "Rate limited (HTTP 429) for {RequestUri} after {MaxRetries} retries. Consider increasing ThrottleMs in FilmAffinity Ratings settings.",
                         requestUri,
                         MaxRateLimitRetries);
-                    return null;
+                    return new FilmAffinityFetchResult(null, RateLimited: true);
                 }
 
                 if (!response.IsSuccessStatusCode)
@@ -171,7 +189,7 @@ public sealed class FilmAffinityScoreClient : IDisposable
                             requestUri);
                     }
 
-                    return null;
+                    return new FilmAffinityFetchResult(null, RateLimited: false);
                 }
 
                 var contentType = response.Content.Headers.ContentType?.MediaType;
@@ -193,7 +211,7 @@ public sealed class FilmAffinityScoreClient : IDisposable
                             requestUri);
                     }
 
-                    return null;
+                    return new FilmAffinityFetchResult(null, RateLimited: false);
                 }
 
                 _cache.SetScore(filmAffinityId, score, productionYear);
@@ -206,10 +224,10 @@ public sealed class FilmAffinityScoreClient : IDisposable
                         filmAffinityId,
                         score.VoteCount,
                         config.MinVotes);
-                    return null;
+                    return new FilmAffinityFetchResult(null, RateLimited: false);
                 }
 
-                return score;
+                return new FilmAffinityFetchResult(score, RateLimited: false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -222,11 +240,11 @@ public sealed class FilmAffinityScoreClient : IDisposable
                     "Failed to fetch FilmAffinity score for ID {FilmAffinityId} from {RequestUri}",
                     filmAffinityId,
                     requestUri);
-                return null;
+                return new FilmAffinityFetchResult(null, RateLimited: false);
             }
         }
 
-        return null;
+        return new FilmAffinityFetchResult(null, RateLimited: true);
     }
 
     /// <inheritdoc />

@@ -41,18 +41,37 @@ public class FilmAffinityRatingService
         int? productionYear,
         CancellationToken cancellationToken)
     {
+        var (filmAffinityId, score, _) = await LookupWithStatusAsync(providerIds, isSeries, productionYear, cancellationToken)
+            .ConfigureAwait(false);
+        return (filmAffinityId, score);
+    }
+
+    /// <summary>
+    /// Resolves the FilmAffinity ID and fetches the corresponding score along with rate-limit status.
+    /// </summary>
+    /// <param name="providerIds">Existing provider IDs on the item (IMDb, TMDb, FilmAffinity).</param>
+    /// <param name="isSeries"><c>true</c> for TV series; <c>false</c> for movies.</param>
+    /// <param name="productionYear">Optional production year.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A tuple containing the resolved FilmAffinity ID, fetched score, and whether HTTP 429 exhausted retries.</returns>
+    public async Task<(string? FilmAffinityId, FilmAffinityScore? Score, bool RateLimited)> LookupWithStatusAsync(
+        IReadOnlyDictionary<string, string>? providerIds,
+        bool isSeries,
+        int? productionYear,
+        CancellationToken cancellationToken)
+    {
         var filmAffinityId = await _resolver.ResolveAsync(providerIds, isSeries, cancellationToken)
             .ConfigureAwait(false);
 
         if (string.IsNullOrEmpty(filmAffinityId))
         {
-            return (null, null);
+            return (null, null, false);
         }
 
-        var score = await _scoreClient.GetScoreAsync(filmAffinityId, productionYear, cancellationToken)
+        var fetchResult = await _scoreClient.FetchScoreAsync(filmAffinityId, productionYear, cancellationToken)
             .ConfigureAwait(false);
 
-        return (filmAffinityId, score);
+        return (filmAffinityId, fetchResult.Score, fetchResult.RateLimited);
     }
 
     /// <summary>

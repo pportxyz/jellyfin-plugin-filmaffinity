@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
+using Jellyfin.Plugin.FilmAffinity.Configuration;
 using Jellyfin.Plugin.FilmAffinity.Services;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
@@ -20,6 +21,8 @@ namespace Jellyfin.Plugin.FilmAffinity.ScheduledTasks;
 /// </summary>
 public class FilmAffinitySyncTask : IScheduledTask
 {
+    private const int MaxConsecutiveRateLimits = 3;
+
     private readonly ILibraryManager _libraryManager;
     private readonly FilmAffinityRatingService _ratingService;
     private readonly ILogger<FilmAffinitySyncTask> _logger;
@@ -64,21 +67,27 @@ public class FilmAffinitySyncTask : IScheduledTask
             Recursive = true
         });
 
+        var config = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+        var setCriticRating = config.SetCriticRating;
+        var syncMode = config.SyncMode;
+
         var items = allItems
             .Where(item => IsEnabledForLibrary(_libraryManager.GetLibraryOptions(item), item.GetType().Name))
+            .Where(item => ShouldProcessItem(item.ProviderIds, syncMode))
             .ToList();
 
         if (items.Count == 0)
         {
             _logger.LogInformation(
-                "No movies or series found in libraries with '{ProviderName}' metadata fetcher enabled.",
+                "No movies or series to sync (SyncMode={SyncMode}) in libraries with '{ProviderName}' metadata fetcher enabled.",
+                syncMode,
                 Plugin.ProviderDisplayName);
             progress.Report(100);
             return;
         }
 
-        var setCriticRating = Plugin.Instance?.Configuration.SetCriticRating == true;
         var updatedCount = 0;
+        var consecutiveRateLimits = 0;
 
         for (var i = 0; i < items.Count; i++)
         {
@@ -87,10 +96,26 @@ public class FilmAffinitySyncTask : IScheduledTask
             var item = items[i];
             var isSeries = item is Series;
 
-            var (filmAffinityId, score) = await _ratingService
-                .LookupAsync(item.ProviderIds, isSeries, item.ProductionYear, cancellationToken)
+            var (filmAffinityId, score, rateLimited) = await _ratingService
+                .LookupWithStatusAsync(item.ProviderIds, isSeries, item.ProductionYear, cancellationToken)
                 .ConfigureAwait(false);
 
+            if (rateLimited)
+            {
+                consecutiveRateLimits++;
+                if (consecutiveRateLimits >= MaxConsecutiveRateLimits)
+                {
+                    _logger.LogWarning(
+                        "Stopping FilmAffinity sync early after {Count} consecutive HTTP 429 rate-limit responses so the cooldown window can reset. Re-run later to continue.",
+                        consecutiveRateLimits);
+                    break;
+                }
+
+                progress.Report((double)(i + 1) / items.Count * 100.0);
+                continue;
+            }
+
+            consecutiveRateLimits = 0;
             var changed = false;
 
             if (!string.IsNullOrEmpty(filmAffinityId)
@@ -170,5 +195,23 @@ public class FilmAffinitySyncTask : IScheduledTask
         var typeOptions = libraryOptions?.GetTypeOptions(itemTypeName);
         return typeOptions?.MetadataFetchers is { Length: > 0 } fetchers
             && Array.Exists(fetchers, f => string.Equals(f, Plugin.ProviderDisplayName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Determines whether an item should be processed under the configured <see cref="SyncMode"/>.
+    /// </summary>
+    /// <param name="providerIds">The item's provider IDs.</param>
+    /// <param name="syncMode">The configured sync mode.</param>
+    /// <returns><c>true</c> if the item should be synced; otherwise <c>false</c>.</returns>
+    internal static bool ShouldProcessItem(IReadOnlyDictionary<string, string>? providerIds, SyncMode syncMode)
+    {
+        if (syncMode == SyncMode.RefreshAll)
+        {
+            return true;
+        }
+
+        return providerIds is null
+            || !providerIds.TryGetValue(Plugin.ProviderKey, out var existingId)
+            || string.IsNullOrWhiteSpace(existingId);
     }
 }
