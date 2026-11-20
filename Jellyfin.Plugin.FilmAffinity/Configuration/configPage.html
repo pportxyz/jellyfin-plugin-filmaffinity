@@ -67,7 +67,7 @@
                     <div class="inputContainer">
                         <label class="inputLabel inputLabelUnfocused" for="ThrottleMs">Request Throttle (ms)</label>
                         <input id="ThrottleMs" name="ThrottleMs" type="number" is="emby-input" min="0" />
-                        <div class="fieldDescription">Minimum delay in milliseconds between consecutive score endpoint requests. Default: 1500.</div>
+                        <div class="fieldDescription">Minimum delay in milliseconds between consecutive score endpoint requests. Default: 3000.</div>
                     </div>
 
                     <div class="inputContainer">
@@ -106,7 +106,7 @@
                         document.querySelector('#LinkLanguage').value = config.LinkLanguage || 'es';
                         document.querySelector('#MinVotes').value = config.MinVotes ?? 50;
                         document.querySelector('#SetCriticRating').checked = Boolean(config.SetCriticRating);
-                        document.querySelector('#ThrottleMs').value = config.ThrottleMs ?? 1500;
+                        document.querySelector('#ThrottleMs').value = config.ThrottleMs ?? 3000;
                         document.querySelector('#RequestTimeoutSeconds').value = config.RequestTimeoutSeconds ?? 20;
                         document.querySelector('#UserAgent').value = config.UserAgent || '';
                         Dashboard.hideLoadingMsg();

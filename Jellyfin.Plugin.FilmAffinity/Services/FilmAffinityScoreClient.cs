@@ -1,4 +1,5 @@
 using System;
+using System.Net;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -19,12 +20,14 @@ public sealed class FilmAffinityScoreClient : IDisposable
     /// </summary>
     public const string HttpClientName = "FilmAffinityScore";
 
+    private const int MaxRateLimitRetries = 2;
+
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly FilmAffinityCacheService _cache;
     private readonly ILogger<FilmAffinityScoreClient> _logger;
     private readonly Func<PluginConfiguration> _configurationProvider;
     private readonly SemaphoreSlim _throttleLock = new(1, 1);
-    private DateTime _lastRequestUtc = DateTime.MinValue;
+    private DateTime _nextAllowedRequestUtc = DateTime.MinValue;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="FilmAffinityScoreClient"/> class.
@@ -100,102 +103,130 @@ public sealed class FilmAffinityScoreClient : IDisposable
             return null;
         }
 
-        await WaitForThrottleAsync(config.ThrottleMs, cancellationToken).ConfigureAwait(false);
-
-        try
+        for (var attempt = 0; attempt <= MaxRateLimitRetries; attempt++)
         {
-            var client = _httpClientFactory.CreateClient(HttpClientName);
-            using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
+            await WaitForThrottleAsync(config.ThrottleMs, cancellationToken).ConfigureAwait(false);
 
-            if (!string.IsNullOrWhiteSpace(config.UserAgent))
+            try
             {
-                request.Headers.UserAgent.TryParseAdd(config.UserAgent);
-            }
+                var client = _httpClientFactory.CreateClient(HttpClientName);
+                using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
 
-            if (!string.IsNullOrWhiteSpace(config.AuthHeaderName)
-                && !string.IsNullOrWhiteSpace(config.AuthHeaderValue))
-            {
-                request.Headers.TryAddWithoutValidation(config.AuthHeaderName, config.AuthHeaderValue);
-            }
-
-            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var timeoutSeconds = Math.Clamp(config.RequestTimeoutSeconds, 1, 120);
-            timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
-
-            using var response = await client.SendAsync(request, timeoutCts.Token).ConfigureAwait(false);
-            var body = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
-
-            if (!response.IsSuccessStatusCode)
-            {
-                if (FilmAffinityScoreParser.IsCloudflareBlocked(response, body))
+                if (!string.IsNullOrWhiteSpace(config.UserAgent))
                 {
+                    request.Headers.UserAgent.TryParseAdd(config.UserAgent);
+                }
+
+                if (!string.IsNullOrWhiteSpace(config.AuthHeaderName)
+                    && !string.IsNullOrWhiteSpace(config.AuthHeaderValue))
+                {
+                    request.Headers.TryAddWithoutValidation(config.AuthHeaderName, config.AuthHeaderValue);
+                }
+
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                var timeoutSeconds = Math.Clamp(config.RequestTimeoutSeconds, 1, 120);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+
+                using var response = await client.SendAsync(request, timeoutCts.Token).ConfigureAwait(false);
+                var body = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
+
+                if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                {
+                    var retryDelay = GetRateLimitDelay(response, config.ThrottleMs, attempt);
+                    await ApplyBackoffAsync(retryDelay, cancellationToken).ConfigureAwait(false);
+
+                    if (attempt < MaxRateLimitRetries)
+                    {
+                        _logger.LogWarning(
+                            "Rate limited (HTTP 429) for {RequestUri}. Backing off for {DelaySeconds:F1}s before retry {Attempt}/{MaxRetries}.",
+                            requestUri,
+                            retryDelay.TotalSeconds,
+                            attempt + 1,
+                            MaxRateLimitRetries);
+                        continue;
+                    }
+
                     _logger.LogWarning(
-                        "Cloudflare protection blocked request to {RequestUri} (HTTP {StatusCode}). Configure an external ScoreEndpointUrl in FilmAffinity Ratings plugin settings.",
+                        "Rate limited (HTTP 429) for {RequestUri} after {MaxRetries} retries. Consider increasing ThrottleMs in FilmAffinity Ratings settings.",
                         requestUri,
-                        (int)response.StatusCode);
-                }
-                else
-                {
-                    _logger.LogWarning(
-                        "FilmAffinity score endpoint returned HTTP {StatusCode} for ID {FilmAffinityId} ({RequestUri})",
-                        (int)response.StatusCode,
-                        filmAffinityId,
-                        requestUri);
+                        MaxRateLimitRetries);
+                    return null;
                 }
 
-                return null;
-            }
-
-            var contentType = response.Content.Headers.ContentType?.MediaType;
-            var score = FilmAffinityScoreParser.Parse(filmAffinityId, body, contentType, config.ResponseMode);
-            if (score is null)
-            {
-                if (FilmAffinityScoreParser.IsCloudflareBlocked(response, body))
+                if (!response.IsSuccessStatusCode)
                 {
-                    _logger.LogWarning(
-                        "Cloudflare protection blocked request to {RequestUri} (HTTP {StatusCode}). Configure an external ScoreEndpointUrl in FilmAffinity Ratings plugin settings.",
-                        requestUri,
-                        (int)response.StatusCode);
+                    if (FilmAffinityScoreParser.IsCloudflareBlocked(response, body))
+                    {
+                        _logger.LogWarning(
+                            "Cloudflare protection blocked request to {RequestUri} (HTTP {StatusCode}). Configure an external ScoreEndpointUrl in FilmAffinity Ratings plugin settings.",
+                            requestUri,
+                            (int)response.StatusCode);
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "FilmAffinity score endpoint returned HTTP {StatusCode} for ID {FilmAffinityId} ({RequestUri})",
+                            (int)response.StatusCode,
+                            filmAffinityId,
+                            requestUri);
+                    }
+
+                    return null;
                 }
-                else
+
+                var contentType = response.Content.Headers.ContentType?.MediaType;
+                var score = FilmAffinityScoreParser.Parse(filmAffinityId, body, contentType, config.ResponseMode);
+                if (score is null)
+                {
+                    if (FilmAffinityScoreParser.IsCloudflareBlocked(response, body))
+                    {
+                        _logger.LogWarning(
+                            "Cloudflare protection blocked request to {RequestUri} (HTTP {StatusCode}). Configure an external ScoreEndpointUrl in FilmAffinity Ratings plugin settings.",
+                            requestUri,
+                            (int)response.StatusCode);
+                    }
+                    else
+                    {
+                        _logger.LogDebug(
+                            "Could not parse FilmAffinity rating for ID {FilmAffinityId} from {RequestUri}",
+                            filmAffinityId,
+                            requestUri);
+                    }
+
+                    return null;
+                }
+
+                _cache.SetScore(filmAffinityId, score, productionYear);
+
+                if (!MeetsMinVotes(score, config.MinVotes))
                 {
                     _logger.LogDebug(
-                        "Could not parse FilmAffinity rating for ID {FilmAffinityId} from {RequestUri}",
+                        "Ignoring FilmAffinity score {Rating} for ID {FilmAffinityId} because vote count {Votes} is below MinVotes ({MinVotes})",
+                        score.Rating,
                         filmAffinityId,
-                        requestUri);
+                        score.VoteCount,
+                        config.MinVotes);
+                    return null;
                 }
 
-                return null;
+                return score;
             }
-
-            _cache.SetScore(filmAffinityId, score, productionYear);
-
-            if (!MeetsMinVotes(score, config.MinVotes))
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                _logger.LogDebug(
-                    "Ignoring FilmAffinity score {Rating} for ID {FilmAffinityId} because vote count {Votes} is below MinVotes ({MinVotes})",
-                    score.Rating,
+                throw;
+            }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Failed to fetch FilmAffinity score for ID {FilmAffinityId} from {RequestUri}",
                     filmAffinityId,
-                    score.VoteCount,
-                    config.MinVotes);
+                    requestUri);
                 return null;
             }
+        }
 
-            return score;
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
-        {
-            _logger.LogWarning(
-                ex,
-                "Failed to fetch FilmAffinity score for ID {FilmAffinityId} from {RequestUri}",
-                filmAffinityId,
-                requestUri);
-            return null;
-        }
+        return null;
     }
 
     /// <inheritdoc />
@@ -209,24 +240,60 @@ public sealed class FilmAffinityScoreClient : IDisposable
         return minVotes <= 0 || !score.VoteCount.HasValue || score.VoteCount.Value >= minVotes;
     }
 
-    private async Task WaitForThrottleAsync(int throttleMs, CancellationToken cancellationToken)
+    private static TimeSpan GetRateLimitDelay(HttpResponseMessage response, int throttleMs, int attempt)
     {
-        if (throttleMs <= 0)
+        if (response.Headers.RetryAfter is { } retryAfter)
         {
-            return;
+            TimeSpan? headerDelay = retryAfter.Delta;
+            if (!headerDelay.HasValue && retryAfter.Date.HasValue)
+            {
+                headerDelay = retryAfter.Date.Value - DateTimeOffset.UtcNow;
+            }
+
+            if (headerDelay.HasValue && headerDelay.Value > TimeSpan.Zero)
+            {
+                return headerDelay.Value > TimeSpan.FromSeconds(120)
+                    ? TimeSpan.FromSeconds(120)
+                    : headerDelay.Value;
+            }
         }
 
+        var baseMs = Math.Max(throttleMs * 4, 15000);
+        var backoffMs = Math.Min(baseMs * (attempt + 1), 60000);
+        return TimeSpan.FromMilliseconds(backoffMs);
+    }
+
+    private async Task ApplyBackoffAsync(TimeSpan delay, CancellationToken cancellationToken)
+    {
         await _throttleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var elapsed = DateTime.UtcNow - _lastRequestUtc;
-            var minDelay = TimeSpan.FromMilliseconds(throttleMs);
-            if (elapsed < minDelay)
+            var target = DateTime.UtcNow + delay;
+            if (target > _nextAllowedRequestUtc)
             {
-                await Task.Delay(minDelay - elapsed, cancellationToken).ConfigureAwait(false);
+                _nextAllowedRequestUtc = target;
+            }
+        }
+        finally
+        {
+            _throttleLock.Release();
+        }
+    }
+
+    private async Task WaitForThrottleAsync(int throttleMs, CancellationToken cancellationToken)
+    {
+        await _throttleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var now = DateTime.UtcNow;
+            if (_nextAllowedRequestUtc > now)
+            {
+                await Task.Delay(_nextAllowedRequestUtc - now, cancellationToken).ConfigureAwait(false);
             }
 
-            _lastRequestUtc = DateTime.UtcNow;
+            _nextAllowedRequestUtc = throttleMs > 0
+                ? DateTime.UtcNow + TimeSpan.FromMilliseconds(throttleMs)
+                : DateTime.UtcNow;
         }
         finally
         {

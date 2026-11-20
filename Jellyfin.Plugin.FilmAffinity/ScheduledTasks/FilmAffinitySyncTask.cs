@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
@@ -7,6 +8,7 @@ using Jellyfin.Plugin.FilmAffinity.Services;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Tasks;
 using Microsoft.Extensions.Logging;
@@ -55,15 +57,22 @@ public class FilmAffinitySyncTask : IScheduledTask
     {
         ArgumentNullException.ThrowIfNull(progress);
 
-        var items = _libraryManager.GetItemList(new InternalItemsQuery
+        var allItems = _libraryManager.GetItemList(new InternalItemsQuery
         {
             IncludeItemTypes = [BaseItemKind.Movie, BaseItemKind.Series],
             IsVirtualItem = false,
             Recursive = true
         });
 
+        var items = allItems
+            .Where(item => IsEnabledForLibrary(_libraryManager.GetLibraryOptions(item), item.GetType().Name))
+            .ToList();
+
         if (items.Count == 0)
         {
+            _logger.LogInformation(
+                "No movies or series found in libraries with '{ProviderName}' metadata fetcher enabled.",
+                Plugin.ProviderDisplayName);
             progress.Report(100);
             return;
         }
@@ -148,5 +157,18 @@ public class FilmAffinitySyncTask : IScheduledTask
                 TimeOfDayTicks = TimeSpan.FromHours(3).Ticks
             }
         ];
+    }
+
+    /// <summary>
+    /// Determines whether the FilmAffinity metadata fetcher is enabled in the given library for the specified item type.
+    /// </summary>
+    /// <param name="libraryOptions">The library options.</param>
+    /// <param name="itemTypeName">The item type name (e.g. <c>Movie</c> or <c>Series</c>).</param>
+    /// <returns><c>true</c> if enabled; otherwise <c>false</c>.</returns>
+    internal static bool IsEnabledForLibrary(LibraryOptions? libraryOptions, string itemTypeName)
+    {
+        var typeOptions = libraryOptions?.GetTypeOptions(itemTypeName);
+        return typeOptions?.MetadataFetchers is { Length: > 0 } fetchers
+            && Array.Exists(fetchers, f => string.Equals(f, Plugin.ProviderDisplayName, StringComparison.OrdinalIgnoreCase));
     }
 }

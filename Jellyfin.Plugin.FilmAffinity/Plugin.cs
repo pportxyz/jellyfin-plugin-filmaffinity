@@ -20,6 +20,11 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public const string ProviderKey = "FilmAffinity";
 
     /// <summary>
+    /// The display name shared by the plugin and its metadata providers.
+    /// </summary>
+    public const string ProviderDisplayName = "FilmAffinity Ratings";
+
+    /// <summary>
     /// Initializes a new instance of the <see cref="Plugin"/> class.
     /// </summary>
     /// <param name="applicationPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
@@ -31,7 +36,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     }
 
     /// <inheritdoc />
-    public override string Name => "FilmAffinity Ratings";
+    public override string Name => ProviderDisplayName;
 
     /// <inheritdoc />
     public override Guid Id => Guid.Parse("a9684ec1-c7fb-4596-8256-9b49032ff42c");

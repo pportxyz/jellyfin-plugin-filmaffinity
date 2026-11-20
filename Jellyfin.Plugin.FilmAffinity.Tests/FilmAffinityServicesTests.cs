@@ -6,7 +6,9 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.FilmAffinity.Configuration;
+using Jellyfin.Plugin.FilmAffinity.ScheduledTasks;
 using Jellyfin.Plugin.FilmAffinity.Services;
+using MediaBrowser.Model.Configuration;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
@@ -180,6 +182,82 @@ public class FilmAffinityServicesTests
         Assert.NotNull(result);
         Assert.Equal(8.4f, result.Rating);
         Assert.Equal(45000, result.VoteCount);
+    }
+
+    [Fact]
+    public void SyncTask_IsEnabledForLibrary_RespectsLibraryMetadataFetchers()
+    {
+        var enabledLibrary = new LibraryOptions
+        {
+            TypeOptions =
+            [
+                new TypeOptions
+                {
+                    Type = "Movie",
+                    MetadataFetchers = ["TheMovieDb", Plugin.ProviderDisplayName]
+                }
+            ]
+        };
+
+        var disabledLibrary = new LibraryOptions
+        {
+            TypeOptions =
+            [
+                new TypeOptions
+                {
+                    Type = "Movie",
+                    MetadataFetchers = ["TheMovieDb"]
+                }
+            ]
+        };
+
+        Assert.True(FilmAffinitySyncTask.IsEnabledForLibrary(enabledLibrary, "Movie"));
+        Assert.False(FilmAffinitySyncTask.IsEnabledForLibrary(enabledLibrary, "Series"));
+        Assert.False(FilmAffinitySyncTask.IsEnabledForLibrary(disabledLibrary, "Movie"));
+        Assert.False(FilmAffinitySyncTask.IsEnabledForLibrary(null, "Movie"));
+    }
+
+    [Fact]
+    public async Task ScoreClient_Http429WithRetryAfter_RetriesAndSucceeds()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var cacheService = new FilmAffinityCacheService(cache);
+        var attempts = 0;
+
+        using var handler = new StubHttpMessageHandler(_ =>
+        {
+            attempts++;
+            if (attempts == 1)
+            {
+                var rateLimited = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+                rateLimited.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromMilliseconds(50));
+                return rateLimited;
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"rating": 7.9, "votes": 1000}""", Encoding.UTF8, "application/json")
+            };
+        });
+
+        var config = new PluginConfiguration
+        {
+            ScoreEndpointUrl = "http://scores.local/score/{id}",
+            MinVotes = 50,
+            ThrottleMs = 0
+        };
+
+        using var client = new FilmAffinityScoreClient(
+            new StubHttpClientFactory(handler),
+            cacheService,
+            NullLogger<FilmAffinityScoreClient>.Instance,
+            () => config);
+
+        var result = await client.GetScoreAsync("144113", 2015, CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal(7.9f, result.Rating);
+        Assert.Equal(2, attempts);
     }
 
     private sealed class StubHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> responder) : HttpMessageHandler

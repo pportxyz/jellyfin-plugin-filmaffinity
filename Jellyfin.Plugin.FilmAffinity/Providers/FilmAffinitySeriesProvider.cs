@@ -38,7 +38,7 @@ public class FilmAffinitySeriesProvider : IRemoteMetadataProvider<Series, Series
     }
 
     /// <inheritdoc />
-    public string Name => "FilmAffinity Ratings";
+    public string Name => Plugin.ProviderDisplayName;
 
     /// <inheritdoc />
     public int Order => 10;

@@ -19,7 +19,7 @@ public class PluginConfiguration : BasePluginConfiguration
         LinkLanguage = "es";
         MinVotes = 50;
         SetCriticRating = false;
-        ThrottleMs = 1500;
+        ThrottleMs = 3000;
         RequestTimeoutSeconds = 20;
         UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
     }
