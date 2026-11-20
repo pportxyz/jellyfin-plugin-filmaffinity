@@ -50,7 +50,7 @@ public class FilmAffinityServicesTests
         });
         var factory = new StubHttpClientFactory(handler);
 
-        var resolver = new WikidataFilmAffinityResolver(
+        using var resolver = new WikidataFilmAffinityResolver(
             factory,
             cacheService,
             NullLogger<WikidataFilmAffinityResolver>.Instance);
@@ -65,6 +65,137 @@ public class FilmAffinityServicesTests
 
         Assert.Equal("809297", resolved);
         Assert.Equal(0, callCount);
+    }
+
+    [Fact]
+    public async Task Resolver_CombinesImdbAndTmdbIntoSingleSparqlQueryAndCachesBoth()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var cacheService = new FilmAffinityCacheService(cache);
+        var callCount = 0;
+        string? seenQuery = null;
+
+        using var handler = new StubHttpMessageHandler(req =>
+        {
+            callCount++;
+            seenQuery = Uri.UnescapeDataString(req.RequestUri?.Query ?? string.Empty);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"results":{"bindings":[{"faId":{"type":"literal","value":"824461"}}]}}""",
+                    Encoding.UTF8,
+                    "application/sparql-results+json")
+            };
+        });
+
+        using var resolver = new WikidataFilmAffinityResolver(
+            new StubHttpClientFactory(handler),
+            cacheService,
+            NullLogger<WikidataFilmAffinityResolver>.Instance,
+            TimeSpan.Zero,
+            TimeSpan.Zero);
+
+        var providerIds = new Dictionary<string, string>
+        {
+            ["Imdb"] = "tt7984734",
+            ["Tmdb"] = "503919"
+        };
+
+        var first = await resolver.ResolveAsync(providerIds, isSeries: false, CancellationToken.None);
+        var second = await resolver.ResolveAsync(
+            new Dictionary<string, string> { ["Tmdb"] = "503919" },
+            isSeries: false,
+            CancellationToken.None);
+
+        Assert.Equal("824461", first);
+        Assert.Equal("824461", second);
+        Assert.Equal(1, callCount);
+        Assert.NotNull(seenQuery);
+        Assert.Contains("P345", seenQuery, StringComparison.Ordinal);
+        Assert.Contains("P4947", seenQuery, StringComparison.Ordinal);
+        Assert.Contains("UNION", seenQuery, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Resolver_RetriesOnTransientTimeoutAndSucceeds()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var cacheService = new FilmAffinityCacheService(cache);
+        var attempts = 0;
+
+        using var handler = new StubHttpMessageHandler(_ =>
+        {
+            attempts++;
+            if (attempts == 1)
+            {
+                throw new TaskCanceledException("Simulated HttpClient timeout");
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"results":{"bindings":[{"faId":{"type":"literal","value":"824461"}}]}}""",
+                    Encoding.UTF8,
+                    "application/sparql-results+json")
+            };
+        });
+
+        using var resolver = new WikidataFilmAffinityResolver(
+            new StubHttpClientFactory(handler),
+            cacheService,
+            NullLogger<WikidataFilmAffinityResolver>.Instance,
+            TimeSpan.Zero,
+            TimeSpan.Zero);
+
+        var resolved = await resolver.ResolveAsync(
+            new Dictionary<string, string> { ["Imdb"] = "tt7984734" },
+            isSeries: false,
+            CancellationToken.None);
+
+        Assert.Equal("824461", resolved);
+        Assert.Equal(2, attempts);
+    }
+
+    [Fact]
+    public async Task Resolver_RetriesOnHttp429AndSucceeds()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var cacheService = new FilmAffinityCacheService(cache);
+        var attempts = 0;
+
+        using var handler = new StubHttpMessageHandler(_ =>
+        {
+            attempts++;
+            if (attempts == 1)
+            {
+                var rateLimited = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+                rateLimited.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromMilliseconds(10));
+                return rateLimited;
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"results":{"bindings":[{"faId":{"type":"literal","value":"824461"}}]}}""",
+                    Encoding.UTF8,
+                    "application/sparql-results+json")
+            };
+        });
+
+        using var resolver = new WikidataFilmAffinityResolver(
+            new StubHttpClientFactory(handler),
+            cacheService,
+            NullLogger<WikidataFilmAffinityResolver>.Instance,
+            TimeSpan.Zero,
+            TimeSpan.Zero);
+
+        var resolved = await resolver.ResolveAsync(
+            new Dictionary<string, string> { ["Imdb"] = "tt7984734" },
+            isSeries: false,
+            CancellationToken.None);
+
+        Assert.Equal("824461", resolved);
+        Assert.Equal(2, attempts);
     }
 
     [Fact]

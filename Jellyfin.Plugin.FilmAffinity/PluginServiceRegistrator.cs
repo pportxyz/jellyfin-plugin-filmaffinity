@@ -16,7 +16,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
     {
         serviceCollection.AddHttpClient(WikidataFilmAffinityResolver.HttpClientName, client =>
         {
-            client.Timeout = TimeSpan.FromSeconds(15);
+            client.Timeout = TimeSpan.FromSeconds(30);
             client.DefaultRequestHeaders.UserAgent.ParseAdd(
                 "Jellyfin.Plugin.FilmAffinity/1.0 (https://github.com/pportxyz/jellyfin-plugin-filmaffinity)");
         });
