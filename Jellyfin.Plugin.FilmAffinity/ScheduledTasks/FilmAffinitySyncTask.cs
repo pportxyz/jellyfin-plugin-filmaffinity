@@ -117,6 +117,15 @@ public class FilmAffinitySyncTask : IScheduledTask
                     .UpdateItemAsync(item, item.GetParent(), ItemUpdateType.MetadataEdit, cancellationToken)
                     .ConfigureAwait(false);
                 updatedCount++;
+
+                if (score is not null)
+                {
+                    _logger.LogInformation(
+                        "Updated {ItemName} with FilmAffinity rating {Rating} (ID {FilmAffinityId})",
+                        item.Name,
+                        score.Rating,
+                        filmAffinityId);
+                }
             }
 
             progress.Report((double)(i + 1) / items.Count * 100.0);

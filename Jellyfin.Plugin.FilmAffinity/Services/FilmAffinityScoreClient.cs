@@ -125,22 +125,24 @@ public sealed class FilmAffinityScoreClient : IDisposable
             using var response = await client.SendAsync(request, timeoutCts.Token).ConfigureAwait(false);
             var body = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
 
-            if (FilmAffinityScoreParser.IsCloudflareBlocked(response, body))
-            {
-                _logger.LogWarning(
-                    "Cloudflare protection blocked request to {RequestUri} (HTTP {StatusCode}). Configure an external ScoreEndpointUrl in FilmAffinity Ratings plugin settings.",
-                    requestUri,
-                    (int)response.StatusCode);
-                return null;
-            }
-
             if (!response.IsSuccessStatusCode)
             {
-                _logger.LogWarning(
-                    "FilmAffinity score endpoint returned HTTP {StatusCode} for ID {FilmAffinityId} ({RequestUri})",
-                    (int)response.StatusCode,
-                    filmAffinityId,
-                    requestUri);
+                if (FilmAffinityScoreParser.IsCloudflareBlocked(response, body))
+                {
+                    _logger.LogWarning(
+                        "Cloudflare protection blocked request to {RequestUri} (HTTP {StatusCode}). Configure an external ScoreEndpointUrl in FilmAffinity Ratings plugin settings.",
+                        requestUri,
+                        (int)response.StatusCode);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "FilmAffinity score endpoint returned HTTP {StatusCode} for ID {FilmAffinityId} ({RequestUri})",
+                        (int)response.StatusCode,
+                        filmAffinityId,
+                        requestUri);
+                }
+
                 return null;
             }
 
@@ -148,10 +150,21 @@ public sealed class FilmAffinityScoreClient : IDisposable
             var score = FilmAffinityScoreParser.Parse(filmAffinityId, body, contentType, config.ResponseMode);
             if (score is null)
             {
-                _logger.LogDebug(
-                    "Could not parse FilmAffinity rating for ID {FilmAffinityId} from {RequestUri}",
-                    filmAffinityId,
-                    requestUri);
+                if (FilmAffinityScoreParser.IsCloudflareBlocked(response, body))
+                {
+                    _logger.LogWarning(
+                        "Cloudflare protection blocked request to {RequestUri} (HTTP {StatusCode}). Configure an external ScoreEndpointUrl in FilmAffinity Ratings plugin settings.",
+                        requestUri,
+                        (int)response.StatusCode);
+                }
+                else
+                {
+                    _logger.LogDebug(
+                        "Could not parse FilmAffinity rating for ID {FilmAffinityId} from {RequestUri}",
+                        filmAffinityId,
+                        requestUri);
+                }
+
                 return null;
             }
 

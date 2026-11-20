@@ -141,6 +141,47 @@ public class FilmAffinityServicesTests
         Assert.Null(result);
     }
 
+    [Fact]
+    public async Task ScoreClient_Http200WithChallengePlatformScriptAndValidRating_ParsesRating()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var cacheService = new FilmAffinityCacheService(cache);
+
+        var html = """
+            <html>
+              <head><script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script></head>
+              <body>
+                <div id="movie-rat-avg" itemprop="ratingValue" content="8.4">8,4</div>
+                <span itemprop="ratingCount" content="45000">45.000</span>
+              </body>
+            </html>
+            """;
+
+        using var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(html, Encoding.UTF8, "text/html")
+        });
+
+        var config = new PluginConfiguration
+        {
+            ScoreEndpointUrl = string.Empty,
+            MinVotes = 50,
+            ThrottleMs = 0
+        };
+
+        using var client = new FilmAffinityScoreClient(
+            new StubHttpClientFactory(handler),
+            cacheService,
+            NullLogger<FilmAffinityScoreClient>.Instance,
+            () => config);
+
+        var result = await client.GetScoreAsync("230129", 2020, CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal(8.4f, result.Rating);
+        Assert.Equal(45000, result.VoteCount);
+    }
+
     private sealed class StubHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> responder) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
