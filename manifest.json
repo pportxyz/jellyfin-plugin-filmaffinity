@@ -1,0 +1,11 @@
+[
+  {
+    "guid": "a9684ec1-c7fb-4596-8256-9b49032ff42c",
+    "name": "FilmAffinity Ratings",
+    "description": "Fetches FilmAffinity scores for movies and TV series using Wikidata (P480) ID resolution and a configurable external score endpoint (JSON API or FilmAffinity HTML proxy/mirror), writing scores to Jellyfin's native CommunityRating (and optionally CriticRating) and registering clickable FilmAffinity external links.",
+    "overview": "Display FilmAffinity ratings on movies and TV shows in Jellyfin.",
+    "owner": "pportxyz",
+    "category": "Metadata",
+    "versions": []
+  }
+]

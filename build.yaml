@@ -1,0 +1,18 @@
+---
+name: "FilmAffinity Ratings"
+guid: "a9684ec1-c7fb-4596-8256-9b49032ff42c"
+version: "1.0.0.0"
+targetAbi: "12.0.0.0"
+framework: "net10.0"
+overview: "Display FilmAffinity ratings on movies and TV shows in Jellyfin."
+description: >
+  Fetches FilmAffinity scores for movies and TV series using Wikidata (P480) ID resolution
+  and a configurable external score endpoint (JSON API or FilmAffinity HTML proxy/mirror),
+  writing scores to Jellyfin's native CommunityRating (and optionally CriticRating) and
+  registering clickable FilmAffinity external links.
+category: "Metadata"
+owner: "pportxyz"
+artifacts:
+- "Jellyfin.Plugin.FilmAffinity.dll"
+changelog: >
+  Initial release for Jellyfin 12 (.NET 10).

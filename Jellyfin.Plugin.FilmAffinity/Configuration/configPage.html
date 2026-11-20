@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>FilmAffinity Ratings</title>
+</head>
+<body>
+    <div id="FilmAffinityConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-select,emby-checkbox">
+        <div data-role="content">
+            <div class="content-primary">
+                <form id="FilmAffinityConfigForm">
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="ScoreEndpointUrl">Score Endpoint URL</label>
+                        <input id="ScoreEndpointUrl" name="ScoreEndpointUrl" type="text" is="emby-input" placeholder="http://localhost:8080/score/{id}" />
+                        <div class="fieldDescription">
+                            External JSON API or FilmAffinity HTML proxy/mirror URL. Supports <code>{id}</code> and <code>{lang}</code> placeholders
+                            (e.g. <code>http://localhost:8080/score/{id}</code> or <code>https://proxy.local/{lang}/film{id}.html</code>).
+                            If no <code>{id}</code> placeholder is present, <code>/score/{id}</code> is appended. Leave blank to try direct FilmAffinity HTML.
+                        </div>
+                    </div>
+
+                    <div class="selectContainer">
+                        <label class="selectLabel" for="ResponseMode">Response Parse Mode</label>
+                        <select is="emby-select" id="ResponseMode" name="ResponseMode" class="emby-select-withcolor emby-select">
+                            <option value="Auto">Auto (detect JSON or HTML)</option>
+                            <option value="Json">JSON API</option>
+                            <option value="Html">FilmAffinity HTML</option>
+                        </select>
+                        <div class="fieldDescription">How to parse responses returned by the Score Endpoint URL.</div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="AuthHeaderName">Auth Header Name (Optional)</label>
+                        <input id="AuthHeaderName" name="AuthHeaderName" type="text" is="emby-input" placeholder="Authorization or X-API-Key" />
+                        <div class="fieldDescription">Optional HTTP header name sent to your score endpoint.</div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="AuthHeaderValue">Auth Header Value (Optional)</label>
+                        <input id="AuthHeaderValue" name="AuthHeaderValue" type="password" is="emby-input" />
+                        <div class="fieldDescription">Optional HTTP header value (e.g. <code>Bearer your-token</code>).</div>
+                    </div>
+
+                    <div class="selectContainer">
+                        <label class="selectLabel" for="LinkLanguage">FilmAffinity Language</label>
+                        <select is="emby-select" id="LinkLanguage" name="LinkLanguage" class="emby-select-withcolor emby-select">
+                            <option value="es">Spanish (es)</option>
+                            <option value="en">English (en)</option>
+                        </select>
+                        <div class="fieldDescription">Language used for clickable FilmAffinity external links and <code>{lang}</code> placeholders.</div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="MinVotes">Minimum Votes</label>
+                        <input id="MinVotes" name="MinVotes" type="number" is="emby-input" min="0" />
+                        <div class="fieldDescription">Ignore FilmAffinity scores with fewer than this many votes (when vote count is available). Default: 50.</div>
+                    </div>
+
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label class="emby-checkbox-label">
+                            <input id="SetCriticRating" name="SetCriticRating" type="checkbox" is="emby-checkbox" />
+                            <span>Also set CriticRating (FilmAffinity score &times; 10)</span>
+                        </label>
+                        <div class="fieldDescription">In addition to CommunityRating (0-10 stars), also write the score on a 0-100 scale to CriticRating.</div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="ThrottleMs">Request Throttle (ms)</label>
+                        <input id="ThrottleMs" name="ThrottleMs" type="number" is="emby-input" min="0" />
+                        <div class="fieldDescription">Minimum delay in milliseconds between consecutive score endpoint requests. Default: 1500.</div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="RequestTimeoutSeconds">Request Timeout (seconds)</label>
+                        <input id="RequestTimeoutSeconds" name="RequestTimeoutSeconds" type="number" is="emby-input" min="1" max="120" />
+                        <div class="fieldDescription">HTTP timeout per request in seconds. Default: 20.</div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="UserAgent">User-Agent</label>
+                        <input id="UserAgent" name="UserAgent" type="text" is="emby-input" />
+                        <div class="fieldDescription">User-Agent header sent when querying the score endpoint.</div>
+                    </div>
+
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                            <span>Save</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <script type="text/javascript">
+            var FilmAffinityConfig = {
+                pluginUniqueId: 'a9684ec1-c7fb-4596-8256-9b49032ff42c'
+            };
+
+            document.querySelector('#FilmAffinityConfigPage')
+                .addEventListener('pageshow', function () {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(FilmAffinityConfig.pluginUniqueId).then(function (config) {
+                        document.querySelector('#ScoreEndpointUrl').value = config.ScoreEndpointUrl || '';
+                        document.querySelector('#ResponseMode').value = config.ResponseMode || 'Auto';
+                        document.querySelector('#AuthHeaderName').value = config.AuthHeaderName || '';
+                        document.querySelector('#AuthHeaderValue').value = config.AuthHeaderValue || '';
+                        document.querySelector('#LinkLanguage').value = config.LinkLanguage || 'es';
+                        document.querySelector('#MinVotes').value = config.MinVotes ?? 50;
+                        document.querySelector('#SetCriticRating').checked = Boolean(config.SetCriticRating);
+                        document.querySelector('#ThrottleMs').value = config.ThrottleMs ?? 1500;
+                        document.querySelector('#RequestTimeoutSeconds').value = config.RequestTimeoutSeconds ?? 20;
+                        document.querySelector('#UserAgent').value = config.UserAgent || '';
+                        Dashboard.hideLoadingMsg();
+                    });
+                });
+
+            document.querySelector('#FilmAffinityConfigForm')
+                .addEventListener('submit', function (e) {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(FilmAffinityConfig.pluginUniqueId).then(function (config) {
+                        config.ScoreEndpointUrl = document.querySelector('#ScoreEndpointUrl').value.trim();
+                        config.ResponseMode = document.querySelector('#ResponseMode').value;
+                        config.AuthHeaderName = document.querySelector('#AuthHeaderName').value.trim();
+                        config.AuthHeaderValue = document.querySelector('#AuthHeaderValue').value;
+                        config.LinkLanguage = document.querySelector('#LinkLanguage').value;
+                        config.MinVotes = parseInt(document.querySelector('#MinVotes').value, 10) || 0;
+                        config.SetCriticRating = document.querySelector('#SetCriticRating').checked;
+                        config.ThrottleMs = parseInt(document.querySelector('#ThrottleMs').value, 10) || 0;
+                        config.RequestTimeoutSeconds = parseInt(document.querySelector('#RequestTimeoutSeconds').value, 10) || 20;
+                        config.UserAgent = document.querySelector('#UserAgent').value.trim();
+
+                        ApiClient.updatePluginConfiguration(FilmAffinityConfig.pluginUniqueId, config).then(function (result) {
+                            Dashboard.processPluginConfigurationUpdateResult(result);
+                        });
+                    });
+
+                    e.preventDefault();
+                    return false;
+                });
+        </script>
+    </div>
+</body>
+</html>

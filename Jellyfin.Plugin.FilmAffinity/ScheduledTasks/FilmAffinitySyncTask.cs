@@ -1,0 +1,143 @@
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using Jellyfin.Data.Enums;
+using Jellyfin.Plugin.FilmAffinity.Services;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.TV;
+using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.Tasks;
+using Microsoft.Extensions.Logging;
+
+namespace Jellyfin.Plugin.FilmAffinity.ScheduledTasks;
+
+/// <summary>
+/// Scheduled task that updates FilmAffinity ratings across all Movies and TV Series in the Jellyfin library.
+/// </summary>
+public class FilmAffinitySyncTask : IScheduledTask
+{
+    private readonly ILibraryManager _libraryManager;
+    private readonly FilmAffinityRatingService _ratingService;
+    private readonly ILogger<FilmAffinitySyncTask> _logger;
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="FilmAffinitySyncTask"/> class.
+    /// </summary>
+    /// <param name="libraryManager">The Jellyfin library manager.</param>
+    /// <param name="ratingService">The FilmAffinity rating service.</param>
+    /// <param name="logger">The logger.</param>
+    public FilmAffinitySyncTask(
+        ILibraryManager libraryManager,
+        FilmAffinityRatingService ratingService,
+        ILogger<FilmAffinitySyncTask> logger)
+    {
+        _libraryManager = libraryManager;
+        _ratingService = ratingService;
+        _logger = logger;
+    }
+
+    /// <inheritdoc />
+    public string Name => "Update FilmAffinity Ratings";
+
+    /// <inheritdoc />
+    public string Key => "FilmAffinityRatingsSync";
+
+    /// <inheritdoc />
+    public string Description => "Resolves FilmAffinity IDs via Wikidata (P480) and updates CommunityRating for all movies and TV series.";
+
+    /// <inheritdoc />
+    public string Category => "Library";
+
+    /// <inheritdoc />
+    public async Task ExecuteAsync(IProgress<double> progress, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(progress);
+
+        var items = _libraryManager.GetItemList(new InternalItemsQuery
+        {
+            IncludeItemTypes = [BaseItemKind.Movie, BaseItemKind.Series],
+            IsVirtualItem = false,
+            Recursive = true
+        });
+
+        if (items.Count == 0)
+        {
+            progress.Report(100);
+            return;
+        }
+
+        var setCriticRating = Plugin.Instance?.Configuration.SetCriticRating == true;
+        var updatedCount = 0;
+
+        for (var i = 0; i < items.Count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var item = items[i];
+            var isSeries = item is Series;
+
+            var (filmAffinityId, score) = await _ratingService
+                .LookupAsync(item.ProviderIds, isSeries, item.ProductionYear, cancellationToken)
+                .ConfigureAwait(false);
+
+            var changed = false;
+
+            if (!string.IsNullOrEmpty(filmAffinityId)
+                && (!item.ProviderIds.TryGetValue(Plugin.ProviderKey, out var currentId)
+                    || !string.Equals(currentId, filmAffinityId, StringComparison.Ordinal)))
+            {
+                item.SetProviderId(Plugin.ProviderKey, filmAffinityId);
+                changed = true;
+            }
+
+            if (score is not null)
+            {
+                if (!item.CommunityRating.HasValue || MathF.Abs(item.CommunityRating.Value - score.Rating) > 0.001f)
+                {
+                    item.CommunityRating = score.Rating;
+                    changed = true;
+                }
+
+                if (setCriticRating)
+                {
+                    var criticRating = FilmAffinityRatingService.ToCriticRating(score.Rating);
+                    if (!item.CriticRating.HasValue || MathF.Abs(item.CriticRating.Value - criticRating) > 0.01f)
+                    {
+                        item.CriticRating = criticRating;
+                        changed = true;
+                    }
+                }
+            }
+
+            if (changed)
+            {
+                await _libraryManager
+                    .UpdateItemAsync(item, item.GetParent(), ItemUpdateType.MetadataEdit, cancellationToken)
+                    .ConfigureAwait(false);
+                updatedCount++;
+            }
+
+            progress.Report((double)(i + 1) / items.Count * 100.0);
+        }
+
+        _logger.LogInformation(
+            "FilmAffinity sync completed: updated {UpdatedCount} of {TotalCount} items",
+            updatedCount,
+            items.Count);
+    }
+
+    /// <inheritdoc />
+    public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
+    {
+        return
+        [
+            new TaskTriggerInfo
+            {
+                Type = TaskTriggerInfoType.DailyTrigger,
+                TimeOfDayTicks = TimeSpan.FromHours(3).Ticks
+            }
+        ];
+    }
+}

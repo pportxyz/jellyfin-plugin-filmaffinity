@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Jellyfin.Plugin.FilmAffinity/Jellyfin.Plugin.FilmAffinity.csproj" />
+  <Project Path="Jellyfin.Plugin.FilmAffinity.Tests/Jellyfin.Plugin.FilmAffinity.Tests.csproj" />
+</Solution>
