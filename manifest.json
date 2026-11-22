@@ -6,6 +6,7 @@
     "overview": "Display FilmAffinity ratings on movies and TV shows in Jellyfin.",
     "owner": "pportxyz",
     "category": "Metadata",
+    "imageUrl": "https://raw.githubusercontent.com/pportxyz/jellyfin-plugin-filmaffinity/main/assets/logo.png",
     "versions": [
       {
         "version": "1.1.0.0",

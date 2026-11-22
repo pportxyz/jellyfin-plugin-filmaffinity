@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="FilmAffinity Ratings" width="420" />
+</p>
+
 # Jellyfin FilmAffinity Ratings Plugin
 
 A Jellyfin **12** (`.NET 10`) metadata plugin that fetches **FilmAffinity** scores for movies and TV series and writes them to Jellyfin's native `CommunityRating` (and optionally `CriticRating`).

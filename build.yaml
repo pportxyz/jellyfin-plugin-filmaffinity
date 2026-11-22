@@ -12,6 +12,7 @@ description: >
   registering clickable FilmAffinity external links.
 category: "Metadata"
 owner: "pportxyz"
+imageUrl: "https://raw.githubusercontent.com/pportxyz/jellyfin-plugin-filmaffinity/main/assets/logo.png"
 artifacts:
 - "Jellyfin.Plugin.FilmAffinity.dll"
 changelog: >
