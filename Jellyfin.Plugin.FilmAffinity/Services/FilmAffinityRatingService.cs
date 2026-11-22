@@ -60,6 +60,11 @@ public class FilmAffinityRatingService
         int? productionYear,
         CancellationToken cancellationToken)
     {
+        if (_scoreClient.IsInRateLimitCooldown)
+        {
+            return (null, null, true);
+        }
+
         var filmAffinityId = await _resolver.ResolveAsync(providerIds, isSeries, cancellationToken)
             .ConfigureAwait(false);
 

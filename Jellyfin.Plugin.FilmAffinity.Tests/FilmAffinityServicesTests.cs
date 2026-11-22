@@ -6,8 +6,10 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.FilmAffinity.Configuration;
+using Jellyfin.Plugin.FilmAffinity.Providers;
 using Jellyfin.Plugin.FilmAffinity.ScheduledTasks;
 using Jellyfin.Plugin.FilmAffinity.Services;
+using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Configuration;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -485,7 +487,200 @@ public class FilmAffinityServicesTests
 
         Assert.Null(result.Score);
         Assert.True(result.RateLimited);
+        Assert.True(client.IsInRateLimitCooldown);
         Assert.Equal(3, attempts);
+    }
+
+    [Fact]
+    public async Task ScoreClient_Http429Exhausted_PausesRequestsDuringCooldownAndResumesAfter()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var cacheService = new FilmAffinityCacheService(cache);
+        var now = new DateTime(2026, 11, 22, 12, 0, 0, DateTimeKind.Utc);
+        var attempts = 0;
+
+        using var handler = new StubHttpMessageHandler(_ =>
+        {
+            attempts++;
+            if (attempts <= 3)
+            {
+                var rateLimited = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+                rateLimited.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromMilliseconds(10));
+                return rateLimited;
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"rating": 8.1, "votes": 500}""", Encoding.UTF8, "application/json")
+            };
+        });
+
+        var config = new PluginConfiguration
+        {
+            ScoreEndpointUrl = "http://scores.local/score/{id}",
+            MinVotes = 50,
+            ThrottleMs = 0,
+            RateLimitCooldownMinutes = 30
+        };
+
+        using var client = new FilmAffinityScoreClient(
+            new StubHttpClientFactory(handler),
+            cacheService,
+            NullLogger<FilmAffinityScoreClient>.Instance,
+            () => config,
+            () => now);
+
+        var first = await client.FetchScoreAsync("144113", 2015, CancellationToken.None);
+        Assert.True(first.RateLimited);
+        Assert.True(client.IsInRateLimitCooldown);
+        Assert.Equal(3, attempts);
+
+        now = now.AddMinutes(20);
+        var skipped = await client.FetchScoreAsync("230129", 2020, CancellationToken.None);
+        Assert.Null(skipped.Score);
+        Assert.True(skipped.RateLimited);
+        Assert.Equal(3, attempts);
+
+        now = now.AddMinutes(10);
+        Assert.False(client.IsInRateLimitCooldown);
+
+        var resumed = await client.FetchScoreAsync("230129", 2020, CancellationToken.None);
+        Assert.False(resumed.RateLimited);
+        Assert.NotNull(resumed.Score);
+        Assert.Equal(8.1f, resumed.Score.Rating);
+        Assert.Equal(4, attempts);
+    }
+
+    [Fact]
+    public async Task ScoreClient_ZeroCooldownMinutes_DisablesCooldownWindow()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var cacheService = new FilmAffinityCacheService(cache);
+        var attempts = 0;
+
+        using var handler = new StubHttpMessageHandler(_ =>
+        {
+            attempts++;
+            if (attempts <= 3)
+            {
+                var rateLimited = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+                rateLimited.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromMilliseconds(10));
+                return rateLimited;
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"rating": 7.5, "votes": 200}""", Encoding.UTF8, "application/json")
+            };
+        });
+
+        var config = new PluginConfiguration
+        {
+            ScoreEndpointUrl = "http://scores.local/score/{id}",
+            MinVotes = 50,
+            ThrottleMs = 0,
+            RateLimitCooldownMinutes = 0
+        };
+
+        using var client = new FilmAffinityScoreClient(
+            new StubHttpClientFactory(handler),
+            cacheService,
+            NullLogger<FilmAffinityScoreClient>.Instance,
+            () => config);
+
+        var first = await client.FetchScoreAsync("144113", 2015, CancellationToken.None);
+        Assert.True(first.RateLimited);
+        Assert.False(client.IsInRateLimitCooldown);
+
+        var second = await client.FetchScoreAsync("230129", 2020, CancellationToken.None);
+        Assert.False(second.RateLimited);
+        Assert.NotNull(second.Score);
+        Assert.Equal(4, attempts);
+    }
+
+    [Fact]
+    public async Task MovieProvider_StopsAndSkipsSubsequentItemsDuringRateLimitCooldown()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var cacheService = new FilmAffinityCacheService(cache);
+        var now = new DateTime(2026, 11, 22, 12, 0, 0, DateTimeKind.Utc);
+        var wikidataCalls = 0;
+        var scoreCalls = 0;
+
+        using var wikidataHandler = new StubHttpMessageHandler(_ =>
+        {
+            wikidataCalls++;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"results":{"bindings":[{"faId":{"type":"literal","value":"824461"}}]}}""",
+                    Encoding.UTF8,
+                    "application/sparql-results+json")
+            };
+        });
+
+        using var scoreHandler = new StubHttpMessageHandler(_ =>
+        {
+            scoreCalls++;
+            var rateLimited = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+            rateLimited.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromMilliseconds(10));
+            return rateLimited;
+        });
+
+        var factory = new NamedStubHttpClientFactory(new Dictionary<string, HttpMessageHandler>
+        {
+            [WikidataFilmAffinityResolver.HttpClientName] = wikidataHandler,
+            [FilmAffinityScoreClient.HttpClientName] = scoreHandler
+        });
+
+        var config = new PluginConfiguration
+        {
+            ScoreEndpointUrl = "http://scores.local/score/{id}",
+            MinVotes = 50,
+            ThrottleMs = 0
+        };
+
+        using var resolver = new WikidataFilmAffinityResolver(
+            factory,
+            cacheService,
+            NullLogger<WikidataFilmAffinityResolver>.Instance,
+            TimeSpan.Zero,
+            TimeSpan.Zero);
+
+        using var scoreClient = new FilmAffinityScoreClient(
+            factory,
+            cacheService,
+            NullLogger<FilmAffinityScoreClient>.Instance,
+            () => config,
+            () => now);
+
+        var ratingService = new FilmAffinityRatingService(resolver, scoreClient);
+        var provider = new FilmAffinityMovieProvider(
+            ratingService,
+            factory,
+            NullLogger<FilmAffinityMovieProvider>.Instance);
+
+        var firstMovie = new MovieInfo
+        {
+            Name = "First New Movie",
+            Year = 2024,
+            ProviderIds = new Dictionary<string, string> { ["Imdb"] = "tt1111111" }
+        };
+
+        var secondMovie = new MovieInfo
+        {
+            Name = "Second New Movie",
+            Year = 2024,
+            ProviderIds = new Dictionary<string, string> { ["Imdb"] = "tt2222222" }
+        };
+
+        var firstResult = await provider.GetMetadata(firstMovie, CancellationToken.None);
+        var secondResult = await provider.GetMetadata(secondMovie, CancellationToken.None);
+
+        Assert.False(firstResult.HasMetadata);
+        Assert.False(secondResult.HasMetadata);
+        Assert.Equal(1, wikidataCalls);
+        Assert.Equal(3, scoreCalls);
     }
 
     [Fact]
@@ -526,5 +721,10 @@ public class FilmAffinityServicesTests
     private sealed class StubHttpClientFactory(HttpMessageHandler handler) : IHttpClientFactory
     {
         public HttpClient CreateClient(string name) => new(handler, disposeHandler: false);
+    }
+
+    private sealed class NamedStubHttpClientFactory(IReadOnlyDictionary<string, HttpMessageHandler> handlers) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => new(handlers[name], disposeHandler: false);
     }
 }

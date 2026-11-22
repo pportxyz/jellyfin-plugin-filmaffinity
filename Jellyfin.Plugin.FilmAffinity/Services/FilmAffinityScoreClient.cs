@@ -26,8 +26,10 @@ public sealed class FilmAffinityScoreClient : IDisposable
     private readonly FilmAffinityCacheService _cache;
     private readonly ILogger<FilmAffinityScoreClient> _logger;
     private readonly Func<PluginConfiguration> _configurationProvider;
+    private readonly Func<DateTime> _utcNowProvider;
     private readonly SemaphoreSlim _throttleLock = new(1, 1);
     private DateTime _nextAllowedRequestUtc = DateTime.MinValue;
+    private long _rateLimitCooldownUntilTicks;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="FilmAffinityScoreClient"/> class.
@@ -39,7 +41,12 @@ public sealed class FilmAffinityScoreClient : IDisposable
         IHttpClientFactory httpClientFactory,
         FilmAffinityCacheService cache,
         ILogger<FilmAffinityScoreClient> logger)
-        : this(httpClientFactory, cache, logger, () => Plugin.Instance?.Configuration ?? new PluginConfiguration())
+        : this(
+            httpClientFactory,
+            cache,
+            logger,
+            () => Plugin.Instance?.Configuration ?? new PluginConfiguration(),
+            null)
     {
     }
 
@@ -55,12 +62,36 @@ public sealed class FilmAffinityScoreClient : IDisposable
         FilmAffinityCacheService cache,
         ILogger<FilmAffinityScoreClient> logger,
         Func<PluginConfiguration> configurationProvider)
+        : this(httpClientFactory, cache, logger, configurationProvider, null)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="FilmAffinityScoreClient"/> class with custom configuration and clock (for testing).
+    /// </summary>
+    /// <param name="httpClientFactory">The HTTP client factory.</param>
+    /// <param name="cache">The cache service.</param>
+    /// <param name="logger">The logger.</param>
+    /// <param name="configurationProvider">Delegate returning the active plugin configuration.</param>
+    /// <param name="utcNowProvider">Optional UTC clock delegate.</param>
+    internal FilmAffinityScoreClient(
+        IHttpClientFactory httpClientFactory,
+        FilmAffinityCacheService cache,
+        ILogger<FilmAffinityScoreClient> logger,
+        Func<PluginConfiguration> configurationProvider,
+        Func<DateTime>? utcNowProvider)
     {
         _httpClientFactory = httpClientFactory;
         _cache = cache;
         _logger = logger;
         _configurationProvider = configurationProvider;
+        _utcNowProvider = utcNowProvider ?? (() => DateTime.UtcNow);
     }
+
+    /// <summary>
+    /// Gets a value indicating whether score requests are currently paused due to an active HTTP 429 cooldown window.
+    /// </summary>
+    public bool IsInRateLimitCooldown => TryGetRemainingCooldown(out _);
 
     /// <summary>
     /// Fetches a FilmAffinity score for the specified FilmAffinity ID.
@@ -104,6 +135,15 @@ public sealed class FilmAffinityScoreClient : IDisposable
             return new FilmAffinityFetchResult(validCached, RateLimited: false);
         }
 
+        if (TryGetRemainingCooldown(out var remainingCooldown))
+        {
+            _logger.LogDebug(
+                "Skipping FilmAffinity score request for ID {FilmAffinityId}; HTTP 429 cooldown active for another {RemainingSeconds:F0}s.",
+                filmAffinityId,
+                remainingCooldown.TotalSeconds);
+            return new FilmAffinityFetchResult(null, RateLimited: true);
+        }
+
         Uri requestUri;
         try
         {
@@ -123,7 +163,17 @@ public sealed class FilmAffinityScoreClient : IDisposable
 
         for (var attempt = 0; attempt <= MaxRateLimitRetries; attempt++)
         {
+            if (TryGetRemainingCooldown(out _))
+            {
+                return new FilmAffinityFetchResult(null, RateLimited: true);
+            }
+
             await WaitForThrottleAsync(config.ThrottleMs, cancellationToken).ConfigureAwait(false);
+
+            if (TryGetRemainingCooldown(out _))
+            {
+                return new FilmAffinityFetchResult(null, RateLimited: true);
+            }
 
             try
             {
@@ -150,11 +200,10 @@ public sealed class FilmAffinityScoreClient : IDisposable
 
                 if (response.StatusCode == HttpStatusCode.TooManyRequests)
                 {
-                    var retryDelay = GetRateLimitDelay(response, config.ThrottleMs, attempt);
-                    await ApplyBackoffAsync(retryDelay, cancellationToken).ConfigureAwait(false);
-
                     if (attempt < MaxRateLimitRetries)
                     {
+                        var retryDelay = GetRateLimitDelay(response, config.ThrottleMs, attempt);
+                        await ApplyBackoffAsync(retryDelay, cancellationToken).ConfigureAwait(false);
                         _logger.LogWarning(
                             "Rate limited (HTTP 429) for {RequestUri}. Backing off for {DelaySeconds:F1}s before retry {Attempt}/{MaxRetries}.",
                             requestUri,
@@ -164,10 +213,24 @@ public sealed class FilmAffinityScoreClient : IDisposable
                         continue;
                     }
 
-                    _logger.LogWarning(
-                        "Rate limited (HTTP 429) for {RequestUri} after {MaxRetries} retries. Consider increasing ThrottleMs in FilmAffinity Ratings settings.",
-                        requestUri,
-                        MaxRateLimitRetries);
+                    var cooldownMinutes = Math.Clamp(config.RateLimitCooldownMinutes, 0, 1440);
+                    if (cooldownMinutes > 0)
+                    {
+                        ActivateRateLimitCooldown(TimeSpan.FromMinutes(cooldownMinutes));
+                        _logger.LogWarning(
+                            "Rate limited (HTTP 429) for {RequestUri} after {MaxRetries} consecutive retries. Pausing FilmAffinity score requests for {CooldownMinutes} minutes so the cooldown window can reset.",
+                            requestUri,
+                            MaxRateLimitRetries,
+                            cooldownMinutes);
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "Rate limited (HTTP 429) for {RequestUri} after {MaxRetries} consecutive retries.",
+                            requestUri,
+                            MaxRateLimitRetries);
+                    }
+
                     return new FilmAffinityFetchResult(null, RateLimited: true);
                 }
 
@@ -279,6 +342,48 @@ public sealed class FilmAffinityScoreClient : IDisposable
         var baseMs = Math.Max(throttleMs * 4, 15000);
         var backoffMs = Math.Min(baseMs * (attempt + 1), 60000);
         return TimeSpan.FromMilliseconds(backoffMs);
+    }
+
+    private bool TryGetRemainingCooldown(out TimeSpan remaining)
+    {
+        var cooldownUntilTicks = Interlocked.Read(ref _rateLimitCooldownUntilTicks);
+        if (cooldownUntilTicks <= 0)
+        {
+            remaining = TimeSpan.Zero;
+            return false;
+        }
+
+        var now = _utcNowProvider();
+        var cooldownUntilUtc = new DateTime(cooldownUntilTicks, DateTimeKind.Utc);
+        if (cooldownUntilUtc > now)
+        {
+            remaining = cooldownUntilUtc - now;
+            return true;
+        }
+
+        Interlocked.CompareExchange(ref _rateLimitCooldownUntilTicks, 0, cooldownUntilTicks);
+        remaining = TimeSpan.Zero;
+        return false;
+    }
+
+    private void ActivateRateLimitCooldown(TimeSpan cooldown)
+    {
+        if (cooldown <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        var targetTicks = (_utcNowProvider() + cooldown).Ticks;
+        long current;
+        do
+        {
+            current = Interlocked.Read(ref _rateLimitCooldownUntilTicks);
+            if (current >= targetTicks)
+            {
+                return;
+            }
+        }
+        while (Interlocked.CompareExchange(ref _rateLimitCooldownUntilTicks, targetTicks, current) != current);
     }
 
     private async Task ApplyBackoffAsync(TimeSpan delay, CancellationToken cancellationToken)

@@ -22,6 +22,7 @@ public class PluginConfiguration : BasePluginConfiguration
         SyncMode = SyncMode.OnlyNewAndUnmatched;
         ThrottleMs = 3000;
         RequestTimeoutSeconds = 20;
+        RateLimitCooldownMinutes = 15;
         UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
     }
 
@@ -79,6 +80,12 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Gets or sets the HTTP request timeout in seconds.
     /// </summary>
     public int RequestTimeoutSeconds { get; set; }
+
+    /// <summary>
+    /// Gets or sets the cooldown duration in minutes to pause FilmAffinity requests after HTTP 429 retries are exhausted.
+    /// Set to <c>0</c> to disable the cooldown window.
+    /// </summary>
+    public int RateLimitCooldownMinutes { get; set; }
 
     /// <summary>
     /// Gets or sets the User-Agent header sent to the score endpoint.

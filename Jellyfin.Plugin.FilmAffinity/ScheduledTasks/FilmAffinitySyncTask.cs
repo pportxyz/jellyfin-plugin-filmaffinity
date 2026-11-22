@@ -21,8 +21,6 @@ namespace Jellyfin.Plugin.FilmAffinity.ScheduledTasks;
 /// </summary>
 public class FilmAffinitySyncTask : IScheduledTask
 {
-    private const int MaxConsecutiveRateLimits = 3;
-
     private readonly ILibraryManager _libraryManager;
     private readonly FilmAffinityRatingService _ratingService;
     private readonly ILogger<FilmAffinitySyncTask> _logger;
@@ -87,7 +85,6 @@ public class FilmAffinitySyncTask : IScheduledTask
         }
 
         var updatedCount = 0;
-        var consecutiveRateLimits = 0;
 
         for (var i = 0; i < items.Count; i++)
         {
@@ -102,20 +99,11 @@ public class FilmAffinitySyncTask : IScheduledTask
 
             if (rateLimited)
             {
-                consecutiveRateLimits++;
-                if (consecutiveRateLimits >= MaxConsecutiveRateLimits)
-                {
-                    _logger.LogWarning(
-                        "Stopping FilmAffinity sync early after {Count} consecutive HTTP 429 rate-limit responses so the cooldown window can reset. Re-run later to continue.",
-                        consecutiveRateLimits);
-                    break;
-                }
-
-                progress.Report((double)(i + 1) / items.Count * 100.0);
-                continue;
+                _logger.LogWarning(
+                    "Stopping FilmAffinity sync early after HTTP 429 rate-limit retries were exhausted. Re-run later once the cooldown window resets.");
+                break;
             }
 
-            consecutiveRateLimits = 0;
             var changed = false;
 
             if (!string.IsNullOrEmpty(filmAffinityId)

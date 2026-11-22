@@ -49,11 +49,11 @@ public class FilmAffinityMovieProvider : IRemoteMetadataProvider<Movie, MovieInf
         ArgumentNullException.ThrowIfNull(info);
 
         var result = new MetadataResult<Movie>();
-        var (filmAffinityId, score) = await _ratingService
-            .LookupAsync(info.ProviderIds, isSeries: false, info.Year, cancellationToken)
+        var (filmAffinityId, score, rateLimited) = await _ratingService
+            .LookupWithStatusAsync(info.ProviderIds, isSeries: false, info.Year, cancellationToken)
             .ConfigureAwait(false);
 
-        if (string.IsNullOrEmpty(filmAffinityId))
+        if (rateLimited || string.IsNullOrEmpty(filmAffinityId))
         {
             return result;
         }

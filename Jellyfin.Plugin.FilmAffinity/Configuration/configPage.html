@@ -86,6 +86,12 @@
                     </div>
 
                     <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="RateLimitCooldownMinutes">Rate Limit Cooldown (minutes)</label>
+                        <input id="RateLimitCooldownMinutes" name="RateLimitCooldownMinutes" type="number" is="emby-input" min="0" max="1440" />
+                        <div class="fieldDescription">Minutes to pause FilmAffinity requests after 2 consecutive HTTP 429 retries fail (library scans continue without waiting). Default: 15. Set to 0 to disable.</div>
+                    </div>
+
+                    <div class="inputContainer">
                         <label class="inputLabel inputLabelUnfocused" for="UserAgent">User-Agent</label>
                         <input id="UserAgent" name="UserAgent" type="text" is="emby-input" />
                         <div class="fieldDescription">User-Agent header sent when querying the score endpoint.</div>
@@ -118,6 +124,7 @@
                         document.querySelector('#SyncMode').value = config.SyncMode || 'OnlyNewAndUnmatched';
                         document.querySelector('#ThrottleMs').value = config.ThrottleMs ?? 3000;
                         document.querySelector('#RequestTimeoutSeconds').value = config.RequestTimeoutSeconds ?? 20;
+                        document.querySelector('#RateLimitCooldownMinutes').value = config.RateLimitCooldownMinutes ?? 15;
                         document.querySelector('#UserAgent').value = config.UserAgent || '';
                         Dashboard.hideLoadingMsg();
                     });
@@ -137,6 +144,8 @@
                         config.SyncMode = document.querySelector('#SyncMode').value;
                         config.ThrottleMs = parseInt(document.querySelector('#ThrottleMs').value, 10) || 0;
                         config.RequestTimeoutSeconds = parseInt(document.querySelector('#RequestTimeoutSeconds').value, 10) || 20;
+                        var cooldownMinutes = parseInt(document.querySelector('#RateLimitCooldownMinutes').value, 10);
+                        config.RateLimitCooldownMinutes = Number.isNaN(cooldownMinutes) ? 15 : Math.max(0, Math.min(1440, cooldownMinutes));
                         config.UserAgent = document.querySelector('#UserAgent').value.trim();
 
                         ApiClient.updatePluginConfiguration(FilmAffinityConfig.pluginUniqueId, config).then(function (result) {
