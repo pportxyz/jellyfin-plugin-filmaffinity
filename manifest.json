@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/pportxyz/jellyfin-plugin-filmaffinity/main/assets/logo.png",
     "versions": [
       {
+        "version": "1.1.1.0",
+        "changelog": "Release v1.1.1",
+        "targetAbi": "12.0.0.0",
+        "sourceUrl": "https://github.com/pportxyz/jellyfin-plugin-filmaffinity/releases/download/v1.1.1/jellyfin-plugin-filmaffinity_1.1.1.0.zip",
+        "checksum": "88b8a2ccf4ee16cdcf4f6833fbeafb9d",
+        "timestamp": "2026-11-22T22:07:00Z"
+      },
+      {
         "version": "1.1.0.0",
         "changelog": "Release v1.1.0",
         "targetAbi": "12.0.0.0",
