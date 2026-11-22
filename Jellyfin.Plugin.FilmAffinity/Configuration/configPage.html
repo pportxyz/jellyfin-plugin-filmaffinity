@@ -67,10 +67,17 @@
                     <div class="selectContainer">
                         <label class="selectLabel" for="SyncMode">Scheduled Sync Mode</label>
                         <select is="emby-select" id="SyncMode" name="SyncMode" class="emby-select-withcolor emby-select">
-                            <option value="OnlyNewAndUnmatched">Only newly added / unmatched items (recommended)</option>
+                            <option value="SmartRefresh">Smart refresh — unmatched, unrated, recent releases &amp; ongoing series (recommended)</option>
+                            <option value="OnlyNewAndUnmatched">Only newly added / unmatched items</option>
                             <option value="RefreshAll">Refresh all items in enabled libraries</option>
                         </select>
-                        <div class="fieldDescription">Choose whether the scheduled task skips items that already have a FilmAffinity ID or refreshes all items.</div>
+                        <div class="fieldDescription">Smart refresh keeps recent releases (0-12 months), items previously below Minimum Votes, and continuing TV series up to date on a tiered schedule without re-fetching stabilized older titles.</div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="MaxItemsPerSyncRun">Max Items Per Sync Run</label>
+                        <input id="MaxItemsPerSyncRun" name="MaxItemsPerSyncRun" type="number" is="emby-input" min="0" />
+                        <div class="fieldDescription">Maximum number of items fetched per scheduled run (prioritizes unmatched/unrated and newest releases; remaining items continue on the next run). Default: 100. Set to 0 for unlimited.</div>
                     </div>
 
                     <div class="inputContainer">
@@ -121,7 +128,8 @@
                         document.querySelector('#LinkLanguage').value = config.LinkLanguage || 'es';
                         document.querySelector('#MinVotes').value = config.MinVotes ?? 50;
                         document.querySelector('#SetCriticRating').checked = Boolean(config.SetCriticRating);
-                        document.querySelector('#SyncMode').value = config.SyncMode || 'OnlyNewAndUnmatched';
+                        document.querySelector('#SyncMode').value = config.SyncMode || 'SmartRefresh';
+                        document.querySelector('#MaxItemsPerSyncRun').value = config.MaxItemsPerSyncRun ?? 100;
                         document.querySelector('#ThrottleMs').value = config.ThrottleMs ?? 3000;
                         document.querySelector('#RequestTimeoutSeconds').value = config.RequestTimeoutSeconds ?? 20;
                         document.querySelector('#RateLimitCooldownMinutes').value = config.RateLimitCooldownMinutes ?? 15;
@@ -142,6 +150,8 @@
                         config.MinVotes = parseInt(document.querySelector('#MinVotes').value, 10) || 0;
                         config.SetCriticRating = document.querySelector('#SetCriticRating').checked;
                         config.SyncMode = document.querySelector('#SyncMode').value;
+                        var maxItemsPerRun = parseInt(document.querySelector('#MaxItemsPerSyncRun').value, 10);
+                        config.MaxItemsPerSyncRun = Number.isNaN(maxItemsPerRun) ? 100 : Math.max(0, maxItemsPerRun);
                         config.ThrottleMs = parseInt(document.querySelector('#ThrottleMs').value, 10) || 0;
                         config.RequestTimeoutSeconds = parseInt(document.querySelector('#RequestTimeoutSeconds').value, 10) || 20;
                         var cooldownMinutes = parseInt(document.querySelector('#RateLimitCooldownMinutes').value, 10);

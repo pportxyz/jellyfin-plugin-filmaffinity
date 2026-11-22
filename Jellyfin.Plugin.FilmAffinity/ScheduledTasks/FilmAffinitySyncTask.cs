@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
 using Jellyfin.Plugin.FilmAffinity.Configuration;
+using Jellyfin.Plugin.FilmAffinity.Models;
 using Jellyfin.Plugin.FilmAffinity.Services;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
@@ -17,28 +18,53 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.FilmAffinity.ScheduledTasks;
 
 /// <summary>
-/// Scheduled task that updates FilmAffinity ratings across all Movies and TV Series in the Jellyfin library.
+/// Scheduled task that updates FilmAffinity ratings across Movies and TV Series in the Jellyfin library.
 /// </summary>
 public class FilmAffinitySyncTask : IScheduledTask
 {
     private readonly ILibraryManager _libraryManager;
     private readonly FilmAffinityRatingService _ratingService;
+    private readonly FilmAffinityRefreshStateStore _stateStore;
     private readonly ILogger<FilmAffinitySyncTask> _logger;
+    private readonly Func<PluginConfiguration> _configurationProvider;
+    private readonly Func<DateTime> _utcNowProvider;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="FilmAffinitySyncTask"/> class.
     /// </summary>
     /// <param name="libraryManager">The Jellyfin library manager.</param>
     /// <param name="ratingService">The FilmAffinity rating service.</param>
+    /// <param name="stateStore">The persistent refresh state store.</param>
     /// <param name="logger">The logger.</param>
     public FilmAffinitySyncTask(
         ILibraryManager libraryManager,
         FilmAffinityRatingService ratingService,
+        FilmAffinityRefreshStateStore stateStore,
         ILogger<FilmAffinitySyncTask> logger)
+        : this(
+            libraryManager,
+            ratingService,
+            stateStore,
+            logger,
+            () => Plugin.Instance?.Configuration ?? new PluginConfiguration(),
+            () => DateTime.UtcNow)
+    {
+    }
+
+    internal FilmAffinitySyncTask(
+        ILibraryManager libraryManager,
+        FilmAffinityRatingService ratingService,
+        FilmAffinityRefreshStateStore stateStore,
+        ILogger<FilmAffinitySyncTask> logger,
+        Func<PluginConfiguration> configurationProvider,
+        Func<DateTime>? utcNowProvider = null)
     {
         _libraryManager = libraryManager;
         _ratingService = ratingService;
+        _stateStore = stateStore;
         _logger = logger;
+        _configurationProvider = configurationProvider;
+        _utcNowProvider = utcNowProvider ?? (() => DateTime.UtcNow);
     }
 
     /// <inheritdoc />
@@ -48,7 +74,7 @@ public class FilmAffinitySyncTask : IScheduledTask
     public string Key => "FilmAffinityRatingsSync";
 
     /// <inheritdoc />
-    public string Description => "Resolves FilmAffinity IDs via Wikidata (P480) and updates CommunityRating for all movies and TV series.";
+    public string Description => "Resolves FilmAffinity IDs via Wikidata (P480) and updates CommunityRating for movies and TV series.";
 
     /// <inheritdoc />
     public string Category => "Library";
@@ -65,19 +91,44 @@ public class FilmAffinitySyncTask : IScheduledTask
             Recursive = true
         });
 
-        var config = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+        var config = _configurationProvider();
         var setCriticRating = config.SetCriticRating;
         var syncMode = config.SyncMode;
+        var maxItemsPerRun = Math.Max(0, config.MaxItemsPerSyncRun);
+        var utcNow = _utcNowProvider();
 
-        var items = allItems
+        var enabledItems = allItems
             .Where(item => IsEnabledForLibrary(_libraryManager.GetLibraryOptions(item), item.GetType().Name))
-            .Where(item => ShouldProcessItem(item.ProviderIds, syncMode))
             .ToList();
 
-        if (items.Count == 0)
+        var stateEntries = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+        var activeItemIds = enabledItems.Select(item => item.Id).ToHashSet();
+        var prunedCount = FilmAffinityRefreshStateStore.PruneDeletedItems(stateEntries, activeItemIds);
+        var stateDirty = prunedCount > 0;
+
+        var candidates = SelectCandidates(enabledItems, stateEntries, syncMode, utcNow);
+        var totalDueCount = candidates.Count;
+
+        if (maxItemsPerRun > 0 && candidates.Count > maxItemsPerRun)
         {
+            candidates = candidates.Take(maxItemsPerRun).ToList();
             _logger.LogInformation(
-                "No movies or series to sync (SyncMode={SyncMode}) in libraries with '{ProviderName}' metadata fetcher enabled.",
+                "Capping FilmAffinity sync run to {MaxItems} of {TotalDue} due items (SyncMode={SyncMode}); remaining {DeferredCount} will be processed in subsequent runs.",
+                maxItemsPerRun,
+                totalDueCount,
+                syncMode,
+                totalDueCount - maxItemsPerRun);
+        }
+
+        if (candidates.Count == 0)
+        {
+            if (stateDirty)
+            {
+                await _stateStore.SaveAsync(stateEntries, cancellationToken).ConfigureAwait(false);
+            }
+
+            _logger.LogInformation(
+                "No movies or series due for sync (SyncMode={SyncMode}) in libraries with '{ProviderName}' metadata fetcher enabled.",
                 syncMode,
                 Plugin.ProviderDisplayName);
             progress.Report(100);
@@ -85,78 +136,121 @@ public class FilmAffinitySyncTask : IScheduledTask
         }
 
         var updatedCount = 0;
+        var processedCount = 0;
 
-        for (var i = 0; i < items.Count; i++)
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var item = items[i];
-            var isSeries = item is Series;
-
-            var (filmAffinityId, score, rateLimited) = await _ratingService
-                .LookupWithStatusAsync(item.ProviderIds, isSeries, item.ProductionYear, cancellationToken)
-                .ConfigureAwait(false);
-
-            if (rateLimited)
+            for (var i = 0; i < candidates.Count; i++)
             {
-                _logger.LogWarning(
-                    "Stopping FilmAffinity sync early after HTTP 429 rate-limit retries were exhausted. Re-run later once the cooldown window resets.");
-                break;
-            }
+                cancellationToken.ThrowIfCancellationRequested();
 
-            var changed = false;
+                var item = candidates[i];
+                var isSeries = item is Series;
 
-            if (!string.IsNullOrEmpty(filmAffinityId)
-                && (!item.ProviderIds.TryGetValue(Plugin.ProviderKey, out var currentId)
-                    || !string.Equals(currentId, filmAffinityId, StringComparison.Ordinal)))
-            {
-                item.SetProviderId(Plugin.ProviderKey, filmAffinityId);
-                changed = true;
-            }
+                var (filmAffinityId, score, rateLimited) = await _ratingService
+                    .LookupWithStatusAsync(item.ProviderIds, isSeries, item.ProductionYear, cancellationToken)
+                    .ConfigureAwait(false);
 
-            if (score is not null)
-            {
-                if (!item.CommunityRating.HasValue || MathF.Abs(item.CommunityRating.Value - score.Rating) > 0.001f)
+                if (rateLimited)
                 {
-                    item.CommunityRating = score.Rating;
+                    _logger.LogWarning(
+                        "Stopping FilmAffinity sync early after HTTP 429 rate-limit retries were exhausted ({ProcessedCount}/{TotalCount} processed). Re-run later once the cooldown window resets.",
+                        processedCount,
+                        candidates.Count);
+                    break;
+                }
+
+                processedCount++;
+                var checkTimeUtc = _utcNowProvider();
+                var effectiveId = !string.IsNullOrEmpty(filmAffinityId)
+                    ? filmAffinityId
+                    : item.ProviderIds.TryGetValue(Plugin.ProviderKey, out var existingId) ? existingId : null;
+
+                stateEntries[item.Id] = new RefreshStateEntry(
+                    effectiveId,
+                    checkTimeUtc,
+                    score?.Rating,
+                    score?.VoteCount);
+                stateDirty = true;
+
+                var changed = false;
+                var previousRating = item.CommunityRating;
+
+                if (!string.IsNullOrEmpty(filmAffinityId)
+                    && (!item.ProviderIds.TryGetValue(Plugin.ProviderKey, out var currentId)
+                        || !string.Equals(currentId, filmAffinityId, StringComparison.Ordinal)))
+                {
+                    item.SetProviderId(Plugin.ProviderKey, filmAffinityId);
                     changed = true;
                 }
 
-                if (setCriticRating)
-                {
-                    var criticRating = FilmAffinityRatingService.ToCriticRating(score.Rating);
-                    if (!item.CriticRating.HasValue || MathF.Abs(item.CriticRating.Value - criticRating) > 0.01f)
-                    {
-                        item.CriticRating = criticRating;
-                        changed = true;
-                    }
-                }
-            }
-
-            if (changed)
-            {
-                await _libraryManager
-                    .UpdateItemAsync(item, item.GetParent(), ItemUpdateType.MetadataEdit, cancellationToken)
-                    .ConfigureAwait(false);
-                updatedCount++;
-
                 if (score is not null)
                 {
-                    _logger.LogInformation(
-                        "Updated {ItemName} with FilmAffinity rating {Rating} (ID {FilmAffinityId})",
-                        item.Name,
-                        score.Rating,
-                        filmAffinityId);
-                }
-            }
+                    if (!item.CommunityRating.HasValue || MathF.Abs(item.CommunityRating.Value - score.Rating) > 0.001f)
+                    {
+                        item.CommunityRating = score.Rating;
+                        changed = true;
+                    }
 
-            progress.Report((double)(i + 1) / items.Count * 100.0);
+                    if (setCriticRating)
+                    {
+                        var criticRating = FilmAffinityRatingService.ToCriticRating(score.Rating);
+                        if (!item.CriticRating.HasValue || MathF.Abs(item.CriticRating.Value - criticRating) > 0.01f)
+                        {
+                            item.CriticRating = criticRating;
+                            changed = true;
+                        }
+                    }
+                }
+
+                if (changed)
+                {
+                    await _libraryManager
+                        .UpdateItemAsync(item, item.GetParent(), ItemUpdateType.MetadataEdit, cancellationToken)
+                        .ConfigureAwait(false);
+                    updatedCount++;
+
+                    if (score is not null)
+                    {
+                        if (previousRating.HasValue && MathF.Abs(previousRating.Value - score.Rating) > 0.001f)
+                        {
+                            _logger.LogInformation(
+                                "Updated {ItemName} FilmAffinity rating: {OldRating} -> {NewRating} ({VoteCount} votes, ID {FilmAffinityId})",
+                                item.Name,
+                                previousRating.Value,
+                                score.Rating,
+                                score.VoteCount,
+                                filmAffinityId);
+                        }
+                        else
+                        {
+                            _logger.LogInformation(
+                                "Updated {ItemName} with FilmAffinity rating {Rating} ({VoteCount} votes, ID {FilmAffinityId})",
+                                item.Name,
+                                score.Rating,
+                                score.VoteCount,
+                                filmAffinityId);
+                        }
+                    }
+                }
+
+                progress.Report((double)(i + 1) / candidates.Count * 100.0);
+            }
+        }
+        finally
+        {
+            if (stateDirty)
+            {
+                await _stateStore.SaveAsync(stateEntries, CancellationToken.None).ConfigureAwait(false);
+            }
         }
 
         _logger.LogInformation(
-            "FilmAffinity sync completed: updated {UpdatedCount} of {TotalCount} items",
+            "FilmAffinity sync completed: updated {UpdatedCount} of {ProcessedCount} processed items ({TotalDue} due, SyncMode={SyncMode})",
             updatedCount,
-            items.Count);
+            processedCount,
+            totalDueCount,
+            syncMode);
     }
 
     /// <inheritdoc />
@@ -193,13 +287,54 @@ public class FilmAffinitySyncTask : IScheduledTask
     /// <returns><c>true</c> if the item should be synced; otherwise <c>false</c>.</returns>
     internal static bool ShouldProcessItem(IReadOnlyDictionary<string, string>? providerIds, SyncMode syncMode)
     {
-        if (syncMode == SyncMode.RefreshAll)
-        {
-            return true;
-        }
+        return FilmAffinityRefreshPolicy.Evaluate(
+            providerIds,
+            communityRating: null,
+            premiereDate: null,
+            productionYear: null,
+            isContinuingSeries: false,
+            state: null,
+            syncMode,
+            DateTime.UtcNow).ShouldProcess;
+    }
 
-        return providerIds is null
-            || !providerIds.TryGetValue(Plugin.ProviderKey, out var existingId)
-            || string.IsNullOrWhiteSpace(existingId);
+    /// <summary>
+    /// Filters and prioritizes items due for processing in the current sync run.
+    /// </summary>
+    /// <param name="items">Items in libraries with the FilmAffinity fetcher enabled.</param>
+    /// <param name="stateEntries">Persisted per-item refresh state.</param>
+    /// <param name="syncMode">The configured sync mode.</param>
+    /// <param name="utcNow">The current UTC timestamp.</param>
+    /// <returns>Prioritized list of items to process.</returns>
+    internal static List<BaseItem> SelectCandidates(
+        IEnumerable<BaseItem> items,
+        IReadOnlyDictionary<Guid, RefreshStateEntry> stateEntries,
+        SyncMode syncMode,
+        DateTime utcNow)
+    {
+        return items
+            .Select(item =>
+            {
+                stateEntries.TryGetValue(item.Id, out var state);
+                var isContinuingSeries = item is Series { Status: SeriesStatus.Continuing };
+                var decision = FilmAffinityRefreshPolicy.Evaluate(
+                    item.ProviderIds,
+                    item.CommunityRating,
+                    item.PremiereDate,
+                    item.ProductionYear,
+                    isContinuingSeries,
+                    state,
+                    syncMode,
+                    utcNow);
+                var releaseDate = FilmAffinityRefreshPolicy.ResolveReleaseDateUtc(item.PremiereDate, item.ProductionYear);
+
+                return (Item: item, Decision: decision, LastCheckedUtc: state?.LastCheckedUtc, ReleaseDate: releaseDate);
+            })
+            .Where(x => x.Decision.ShouldProcess)
+            .OrderBy(x => x.Decision.Priority)
+            .ThenBy(x => x.LastCheckedUtc ?? DateTime.MinValue)
+            .ThenByDescending(x => x.ReleaseDate ?? DateTime.MinValue)
+            .Select(x => x.Item)
+            .ToList();
     }
 }

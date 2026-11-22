@@ -13,5 +13,11 @@ public enum SyncMode
     /// <summary>
     /// Refresh FilmAffinity ratings for all items in enabled libraries.
     /// </summary>
-    RefreshAll = 1
+    RefreshAll = 1,
+
+    /// <summary>
+    /// Tiered smart refresh: processes unmatched/unrated items, recent releases (0-12 months),
+    /// and ongoing TV series on age- and vote-based cadences while skipping stabilized catalog items.
+    /// </summary>
+    SmartRefresh = 2
 }

@@ -19,7 +19,8 @@ public class PluginConfiguration : BasePluginConfiguration
         LinkLanguage = "es";
         MinVotes = 50;
         SetCriticRating = false;
-        SyncMode = SyncMode.OnlyNewAndUnmatched;
+        SyncMode = SyncMode.SmartRefresh;
+        MaxItemsPerSyncRun = 100;
         ThrottleMs = 3000;
         RequestTimeoutSeconds = 20;
         RateLimitCooldownMinutes = 15;
@@ -67,9 +68,15 @@ public class PluginConfiguration : BasePluginConfiguration
     public bool SetCriticRating { get; set; }
 
     /// <summary>
-    /// Gets or sets which items the scheduled sync task processes (<see cref="Configuration.SyncMode.OnlyNewAndUnmatched"/> or <see cref="Configuration.SyncMode.RefreshAll"/>).
+    /// Gets or sets which items the scheduled sync task processes (<see cref="Configuration.SyncMode.SmartRefresh"/>, <see cref="Configuration.SyncMode.OnlyNewAndUnmatched"/>, or <see cref="Configuration.SyncMode.RefreshAll"/>).
     /// </summary>
     public SyncMode SyncMode { get; set; }
+
+    /// <summary>
+    /// Gets or sets the maximum number of items to fetch per scheduled sync run.
+    /// Set to <c>0</c> for unlimited. Default: <c>100</c>.
+    /// </summary>
+    public int MaxItemsPerSyncRun { get; set; }
 
     /// <summary>
     /// Gets or sets the minimum delay in milliseconds between consecutive score endpoint requests.

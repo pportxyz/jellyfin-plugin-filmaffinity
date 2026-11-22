@@ -24,6 +24,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddHttpClient(FilmAffinityScoreClient.HttpClientName);
 
         serviceCollection.AddSingleton<FilmAffinityCacheService>();
+        serviceCollection.AddSingleton<FilmAffinityRefreshStateStore>();
         serviceCollection.AddSingleton<WikidataFilmAffinityResolver>();
         serviceCollection.AddSingleton<FilmAffinityScoreClient>();
         serviceCollection.AddSingleton<FilmAffinityRatingService>();

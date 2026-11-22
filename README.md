@@ -12,7 +12,7 @@ A Jellyfin **12** (`.NET 10`) metadata plugin that fetches **FilmAffinity** scor
   - **HTML mode** for a FilmAffinity reverse proxy/mirror (or direct FilmAffinity HTML if not blocked by Cloudflare).
 - **Both Metadata Provider & Scheduled Task**:
   - Runs automatically on library scans/refreshes for Movies and Series.
-  - Includes a daily *"Update FilmAffinity Ratings"* scheduled task to backfill and refresh existing libraries.
+  - Includes a daily *"Update FilmAffinity Ratings"* scheduled task with **Smart Refresh** mode (automatically re-checks recent releases, items previously below `MinVotes`, and ongoing TV series on age- and vote-based cadences with persistent state and configurable `MaxItemsPerSyncRun` budgeting).
 - **Polite & Resilient**:
   - Configurable request throttling (`ThrottleMs`), minimum vote threshold (`MinVotes`), optional `CriticRating` (`rating × 10`), Cloudflare `403` detection with clear log warnings, and in-memory TTL caching (6h for recent releases, 24h for older titles).
   - Never overwrites existing TMDb/IMDb ratings when a title has no FilmAffinity match or the endpoint fails.
