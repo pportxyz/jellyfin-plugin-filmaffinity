@@ -113,7 +113,7 @@ public class FilmAffinityServicesTests
         Assert.NotNull(seenQuery);
         Assert.Contains("P345", seenQuery, StringComparison.Ordinal);
         Assert.Contains("P4947", seenQuery, StringComparison.Ordinal);
-        Assert.Contains("UNION", seenQuery, StringComparison.Ordinal);
+        Assert.Contains("VALUES", seenQuery, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -196,6 +196,68 @@ public class FilmAffinityServicesTests
 
         Assert.Equal("824461", resolved);
         Assert.Equal(2, attempts);
+    }
+
+    [Fact]
+    public async Task Resolver_LimitsConcurrentInFlightRequests()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var cacheService = new FilmAffinityCacheService(cache);
+        var inFlight = 0;
+        var maxInFlight = 0;
+
+        using var handler = new AsyncStubHttpMessageHandler(async (_, ct) =>
+        {
+            var current = Interlocked.Increment(ref inFlight);
+            int observed;
+            do
+            {
+                observed = maxInFlight;
+                if (current <= observed)
+                {
+                    break;
+                }
+            }
+            while (Interlocked.CompareExchange(ref maxInFlight, current, observed) != observed);
+
+            try
+            {
+                await Task.Delay(50, ct);
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(
+                        """{"results":{"bindings":[{"faId":{"type":"literal","value":"824461"}}]}}""",
+                        Encoding.UTF8,
+                        "application/sparql-results+json")
+                };
+            }
+            finally
+            {
+                Interlocked.Decrement(ref inFlight);
+            }
+        });
+
+        using var resolver = new WikidataFilmAffinityResolver(
+            new StubHttpClientFactory(handler),
+            cacheService,
+            NullLogger<WikidataFilmAffinityResolver>.Instance,
+            TimeSpan.Zero,
+            TimeSpan.Zero);
+
+        var tasks = new Task<string?>[6];
+        for (var i = 0; i < tasks.Length; i++)
+        {
+            var imdbId = $"tt000000{i}";
+            tasks[i] = resolver.ResolveAsync(
+                new Dictionary<string, string> { ["Imdb"] = imdbId },
+                isSeries: false,
+                CancellationToken.None);
+        }
+
+        var results = await Task.WhenAll(tasks);
+
+        Assert.All(results, id => Assert.Equal("824461", id));
+        Assert.InRange(maxInFlight, 1, 2);
     }
 
     [Fact]
@@ -450,6 +512,14 @@ public class FilmAffinityServicesTests
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             return Task.FromResult(responder(request));
+        }
+    }
+
+    private sealed class AsyncStubHttpMessageHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> responder) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            return responder(request, cancellationToken);
         }
     }
 

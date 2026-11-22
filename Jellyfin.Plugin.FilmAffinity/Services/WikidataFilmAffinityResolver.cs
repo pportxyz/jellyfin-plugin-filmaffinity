@@ -23,6 +23,7 @@ public sealed class WikidataFilmAffinityResolver : IDisposable
 
     private const string SparqlEndpoint = "https://query.wikidata.org/sparql";
     private const int MaxRetries = 2;
+    private const int MaxConcurrentRequests = 2;
 
     private static readonly TimeSpan DefaultThrottleDelay = TimeSpan.FromMilliseconds(350);
     private static readonly TimeSpan DefaultRetryBaseDelay = TimeSpan.FromSeconds(2);
@@ -33,6 +34,7 @@ public sealed class WikidataFilmAffinityResolver : IDisposable
     private readonly ILogger<WikidataFilmAffinityResolver> _logger;
     private readonly TimeSpan _throttleDelay;
     private readonly TimeSpan _retryBaseDelay;
+    private readonly SemaphoreSlim _concurrencyLock = new(MaxConcurrentRequests, MaxConcurrentRequests);
     private readonly SemaphoreSlim _throttleLock = new(1, 1);
     private DateTime _nextAllowedRequestUtc = DateTime.MinValue;
 
@@ -189,6 +191,7 @@ public sealed class WikidataFilmAffinityResolver : IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
+        _concurrencyLock.Dispose();
         _throttleLock.Dispose();
     }
 
@@ -200,14 +203,14 @@ public sealed class WikidataFilmAffinityResolver : IDisposable
             return $"SELECT ?faId WHERE {{ ?item wdt:{property} \"{EscapeSparqlLiteral(value)}\" ; wdt:P480 ?faId . }} LIMIT 1";
         }
 
-        var branches = new string[lookups.Count];
+        var tuples = new string[lookups.Count];
         for (var i = 0; i < lookups.Count; i++)
         {
             var (property, value, _) = lookups[i];
-            branches[i] = $"{{ ?item wdt:{property} \"{EscapeSparqlLiteral(value)}\" ; wdt:P480 ?faId . BIND({i + 1} AS ?priority) }}";
+            tuples[i] = $"(wdt:{property} \"{EscapeSparqlLiteral(value)}\" {i + 1})";
         }
 
-        return $"SELECT ?faId WHERE {{ {string.Join(" UNION ", branches)} }} ORDER BY ?priority LIMIT 1";
+        return $"SELECT ?faId WHERE {{ VALUES (?prop ?val ?priority) {{ {string.Join(" ", tuples)} }} ?item ?prop ?val ; wdt:P480 ?faId . }} ORDER BY ?priority LIMIT 1";
     }
 
     private static string EscapeSparqlLiteral(string value)
@@ -261,10 +264,11 @@ public sealed class WikidataFilmAffinityResolver : IDisposable
 
         for (var attempt = 0; attempt <= MaxRetries; attempt++)
         {
-            await WaitForThrottleAsync(cancellationToken).ConfigureAwait(false);
-
+            await _concurrencyLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                await WaitForThrottleAsync(cancellationToken).ConfigureAwait(false);
+
                 var client = _httpClientFactory.CreateClient(HttpClientName);
                 using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
                 request.Headers.Accept.ParseAdd("application/sparql-results+json");
@@ -313,9 +317,9 @@ public sealed class WikidataFilmAffinityResolver : IDisposable
                     var delay = GetRetryDelay(null, attempt);
                     await ApplyBackoffAsync(delay, cancellationToken).ConfigureAwait(false);
                     _logger.LogWarning(
-                        ex,
-                        "Wikidata SPARQL request error for {Lookups}. Backing off for {DelaySeconds:F1}s before retry {Attempt}/{MaxRetries}.",
+                        "Wikidata SPARQL request error for {Lookups} ({ErrorMessage}). Backing off for {DelaySeconds:F1}s before retry {Attempt}/{MaxRetries}.",
                         lookupDescription,
+                        ex.Message,
                         delay.TotalSeconds,
                         attempt + 1,
                         MaxRetries);
@@ -328,6 +332,10 @@ public sealed class WikidataFilmAffinityResolver : IDisposable
                     lookupDescription,
                     MaxRetries);
                 return null;
+            }
+            finally
+            {
+                _concurrencyLock.Release();
             }
         }
 
