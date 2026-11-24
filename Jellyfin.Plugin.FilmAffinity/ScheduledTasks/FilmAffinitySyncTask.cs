@@ -127,10 +127,28 @@ public class FilmAffinitySyncTask : IScheduledTask
                 await _stateStore.SaveAsync(stateEntries, cancellationToken).ConfigureAwait(false);
             }
 
-            _logger.LogInformation(
-                "No movies or series due for sync (SyncMode={SyncMode}) in libraries with '{ProviderName}' metadata fetcher enabled.",
-                syncMode,
-                Plugin.ProviderDisplayName);
+            if (enabledItems.Count == 0)
+            {
+                _logger.LogInformation(
+                    "No movies or series found in libraries with {ProviderName} metadata fetcher enabled (TotalItems={TotalItems}).",
+                    Plugin.ProviderDisplayName,
+                    allItems.Count);
+            }
+            else
+            {
+                var unmatchedInCooldown = enabledItems.Count(item =>
+                    !item.ProviderIds.TryGetValue(Plugin.ProviderKey, out var id) || string.IsNullOrWhiteSpace(id));
+                var matchedNotDue = enabledItems.Count - unmatchedInCooldown;
+
+                _logger.LogInformation(
+                    "No movies or series due for sync (SyncMode={SyncMode}, EnabledItems={EnabledItems}, MatchedNotDue={MatchedNotDue}, UnmatchedInCooldown={UnmatchedInCooldown}) in libraries with {ProviderName} metadata fetcher enabled.",
+                    syncMode,
+                    enabledItems.Count,
+                    matchedNotDue,
+                    unmatchedInCooldown,
+                    Plugin.ProviderDisplayName);
+            }
+
             progress.Report(100);
             return;
         }
@@ -147,12 +165,25 @@ public class FilmAffinitySyncTask : IScheduledTask
                 var item = candidates[i];
                 var isSeries = item is Series;
 
-                var (filmAffinityId, score, rateLimited) = await _ratingService
-                    .LookupWithStatusAsync(item.ProviderIds, isSeries, item.ProductionYear, cancellationToken)
+                var lookup = await _ratingService
+                    .LookupDetailedAsync(item.ProviderIds, isSeries, item.ProductionYear, item.Name, item.OriginalTitle, cancellationToken)
                     .ConfigureAwait(false);
+                var filmAffinityId = lookup.FilmAffinityId;
+                var score = lookup.Score;
 
-                if (rateLimited)
+                if (lookup.RateLimited)
                 {
+                    if (!string.IsNullOrEmpty(filmAffinityId)
+                        && (!item.ProviderIds.TryGetValue(Plugin.ProviderKey, out var currentRateLimitedId)
+                            || !string.Equals(currentRateLimitedId, filmAffinityId, StringComparison.Ordinal)))
+                    {
+                        item.SetProviderId(Plugin.ProviderKey, filmAffinityId);
+                        await _libraryManager
+                            .UpdateItemAsync(item, item.GetParent(), ItemUpdateType.MetadataEdit, cancellationToken)
+                            .ConfigureAwait(false);
+                        updatedCount++;
+                    }
+
                     _logger.LogWarning(
                         "Stopping FilmAffinity sync early after HTTP 429 rate-limit retries were exhausted ({ProcessedCount}/{TotalCount} processed). Re-run later once the cooldown window resets.",
                         processedCount,
@@ -166,12 +197,21 @@ public class FilmAffinitySyncTask : IScheduledTask
                     ? filmAffinityId
                     : item.ProviderIds.TryGetValue(Plugin.ProviderKey, out var existingId) ? existingId : null;
 
-                stateEntries[item.Id] = new RefreshStateEntry(
-                    effectiveId,
-                    checkTimeUtc,
-                    score?.Rating,
-                    score?.VoteCount);
-                stateDirty = true;
+                if (string.IsNullOrEmpty(effectiveId) && lookup.HadTransientError)
+                {
+                    _logger.LogWarning(
+                        "Skipping refresh-state cooldown update for {ItemName} because ID resolution encountered a transient error; it will be retried on the next sync run.",
+                        item.Name);
+                }
+                else
+                {
+                    stateEntries[item.Id] = new RefreshStateEntry(
+                        effectiveId,
+                        checkTimeUtc,
+                        score?.Rating,
+                        score?.VoteCount);
+                    stateDirty = true;
+                }
 
                 var changed = false;
                 var previousRating = item.CommunityRating;

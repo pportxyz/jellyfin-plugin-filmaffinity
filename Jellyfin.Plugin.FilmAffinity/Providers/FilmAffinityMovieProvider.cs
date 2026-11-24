@@ -49,14 +49,17 @@ public class FilmAffinityMovieProvider : IRemoteMetadataProvider<Movie, MovieInf
         ArgumentNullException.ThrowIfNull(info);
 
         var result = new MetadataResult<Movie>();
-        var (filmAffinityId, score, rateLimited) = await _ratingService
-            .LookupWithStatusAsync(info.ProviderIds, isSeries: false, info.Year, cancellationToken)
+        var lookup = await _ratingService
+            .LookupDetailedAsync(info.ProviderIds, isSeries: false, info.Year, info.Name, info.OriginalTitle, cancellationToken)
             .ConfigureAwait(false);
 
-        if (rateLimited || string.IsNullOrEmpty(filmAffinityId))
+        if (lookup.RateLimited || string.IsNullOrEmpty(lookup.FilmAffinityId))
         {
             return result;
         }
+
+        var filmAffinityId = lookup.FilmAffinityId;
+        var score = lookup.Score;
 
         var movie = new Movie();
         movie.SetProviderId(Plugin.ProviderKey, filmAffinityId);

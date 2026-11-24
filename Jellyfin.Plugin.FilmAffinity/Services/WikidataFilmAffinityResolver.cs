@@ -6,6 +6,7 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Plugin.FilmAffinity.Models;
 using MediaBrowser.Model.Entities;
 using Microsoft.Extensions.Logging;
 
@@ -87,15 +88,31 @@ public sealed class WikidataFilmAffinityResolver : IDisposable
         bool isSeries,
         CancellationToken cancellationToken)
     {
+        var result = await ResolveWithStatusAsync(providerIds, isSeries, cancellationToken).ConfigureAwait(false);
+        return result.FilmAffinityId;
+    }
+
+    /// <summary>
+    /// Resolves a FilmAffinity ID from provider IDs while distinguishing confirmed missing P480 claims from transient errors.
+    /// </summary>
+    /// <param name="providerIds">Existing provider IDs on the item (IMDb, TMDb, FilmAffinity).</param>
+    /// <param name="isSeries"><c>true</c> for TV series; <c>false</c> for movies.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A <see cref="WikidataResolutionResult"/> containing the resolved ID and transient-error status.</returns>
+    public async Task<WikidataResolutionResult> ResolveWithStatusAsync(
+        IReadOnlyDictionary<string, string>? providerIds,
+        bool isSeries,
+        CancellationToken cancellationToken)
+    {
         if (providerIds is null || providerIds.Count == 0)
         {
-            return null;
+            return new WikidataResolutionResult(null, HadTransientError: false);
         }
 
         if (providerIds.TryGetValue(Plugin.ProviderKey, out var existingId)
             && !string.IsNullOrWhiteSpace(existingId))
         {
-            return existingId.Trim();
+            return new WikidataResolutionResult(existingId.Trim(), HadTransientError: false);
         }
 
         var lookups = new List<(string Property, string Value, string CacheKey)>(2);
@@ -117,7 +134,7 @@ public sealed class WikidataFilmAffinityResolver : IDisposable
 
         if (lookups.Count == 0)
         {
-            return null;
+            return new WikidataResolutionResult(null, HadTransientError: false);
         }
 
         var uncachedLookups = new List<(string Property, string Value, string CacheKey)>(lookups.Count);
@@ -127,7 +144,7 @@ public sealed class WikidataFilmAffinityResolver : IDisposable
             {
                 if (!string.IsNullOrEmpty(cachedId))
                 {
-                    return cachedId;
+                    return new WikidataResolutionResult(cachedId, HadTransientError: false);
                 }
             }
             else
@@ -138,7 +155,7 @@ public sealed class WikidataFilmAffinityResolver : IDisposable
 
         if (uncachedLookups.Count == 0)
         {
-            return null;
+            return new WikidataResolutionResult(null, HadTransientError: false);
         }
 
         return await QueryLookupsAsync(uncachedLookups, cancellationToken).ConfigureAwait(false);
@@ -254,7 +271,7 @@ public sealed class WikidataFilmAffinityResolver : IDisposable
         return computed > MaxRetryDelay ? MaxRetryDelay : computed;
     }
 
-    private async Task<string?> QueryLookupsAsync(
+    private async Task<WikidataResolutionResult> QueryLookupsAsync(
         IReadOnlyList<(string Property, string Value, string CacheKey)> lookups,
         CancellationToken cancellationToken)
     {
@@ -294,7 +311,7 @@ public sealed class WikidataFilmAffinityResolver : IDisposable
                         "Wikidata SPARQL lookup failed for {Lookups} with HTTP {StatusCode}",
                         lookupDescription,
                         (int)response.StatusCode);
-                    return null;
+                    return new WikidataResolutionResult(null, HadTransientError: true);
                 }
 
                 var content = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
@@ -304,7 +321,7 @@ public sealed class WikidataFilmAffinityResolver : IDisposable
                     _cache.SetFilmAffinityId(lookup.CacheKey, filmAffinityId);
                 }
 
-                return filmAffinityId;
+                return new WikidataResolutionResult(filmAffinityId, HadTransientError: false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -331,7 +348,7 @@ public sealed class WikidataFilmAffinityResolver : IDisposable
                     "Wikidata SPARQL request error for {Lookups} after {MaxRetries} retries",
                     lookupDescription,
                     MaxRetries);
-                return null;
+                return new WikidataResolutionResult(null, HadTransientError: true);
             }
             finally
             {
@@ -339,7 +356,7 @@ public sealed class WikidataFilmAffinityResolver : IDisposable
             }
         }
 
-        return null;
+        return new WikidataResolutionResult(null, HadTransientError: true);
     }
 
     private async Task ApplyBackoffAsync(TimeSpan delay, CancellationToken cancellationToken)

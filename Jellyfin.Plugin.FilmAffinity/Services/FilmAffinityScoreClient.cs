@@ -310,10 +310,256 @@ public sealed class FilmAffinityScoreClient : IDisposable
         return new FilmAffinityFetchResult(null, RateLimited: true);
     }
 
+    /// <summary>
+    /// Searches FilmAffinity directly by title, media type, and optional year as a fallback when Wikidata lacks a P480 claim.
+    /// Shares the same throttle, rate-limit cooldown, and Cloudflare detection as score fetches.
+    /// </summary>
+    /// <param name="title">The primary item title.</param>
+    /// <param name="originalTitle">Optional original item title.</param>
+    /// <param name="isSeries"><c>true</c> for TV series; <c>false</c> for movies.</param>
+    /// <param name="productionYear">Optional production year.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A <see cref="FilmAffinitySearchResult"/> containing any unambiguous match and error status.</returns>
+    public async Task<FilmAffinitySearchResult> SearchFilmAffinityIdAsync(
+        string? title,
+        string? originalTitle,
+        bool isSeries,
+        int? productionYear,
+        CancellationToken cancellationToken)
+    {
+        var primaryTitle = !string.IsNullOrWhiteSpace(title) ? title.Trim() : originalTitle?.Trim();
+        if (string.IsNullOrWhiteSpace(primaryTitle))
+        {
+            return new FilmAffinitySearchResult(null, RateLimited: false, HadTransientError: false);
+        }
+
+        var config = _configurationProvider();
+        if (!FilmAffinitySearchParser.CanUseDirectSearch(config.ScoreEndpointUrl))
+        {
+            return new FilmAffinitySearchResult(null, RateLimited: false, HadTransientError: false);
+        }
+
+        var lang = FilmAffinityScoreParser.NormalizeLanguage(config.LinkLanguage);
+        var normalizedPrimary = FilmAffinitySearchParser.NormalizeTitle(primaryTitle);
+        var normalizedOriginal = FilmAffinitySearchParser.NormalizeTitle(originalTitle);
+        var cacheKey = $"search:{lang}:{(isSeries ? "tv" : "movie")}:{normalizedPrimary}:{normalizedOriginal}:{productionYear}";
+
+        if (_cache.TryGetFilmAffinityId(cacheKey, out var cachedId))
+        {
+            return new FilmAffinitySearchResult(cachedId, RateLimited: false, HadTransientError: false);
+        }
+
+        if (TryGetRemainingCooldown(out var remainingCooldown))
+        {
+            _logger.LogDebug(
+                "Skipping FilmAffinity title search for {Title}; HTTP 429 cooldown active for another {RemainingSeconds:F0}s.",
+                primaryTitle,
+                remainingCooldown.TotalSeconds);
+            return new FilmAffinitySearchResult(null, RateLimited: true, HadTransientError: true);
+        }
+
+        var queries = new System.Collections.Generic.List<(string QueryTitle, string QueryLanguage)>(2)
+        {
+            (primaryTitle, lang)
+        };
+
+        if (!string.IsNullOrWhiteSpace(originalTitle)
+            && !string.IsNullOrEmpty(normalizedOriginal)
+            && !string.Equals(normalizedOriginal, normalizedPrimary, StringComparison.Ordinal))
+        {
+            queries.Add((originalTitle.Trim(), "en"));
+        }
+
+        var hadTransientError = false;
+        foreach (var (queryTitle, queryLang) in queries)
+        {
+            var result = await ExecuteSearchQueryAsync(
+                queryTitle,
+                queryLang,
+                primaryTitle,
+                originalTitle,
+                isSeries,
+                productionYear,
+                config,
+                cancellationToken).ConfigureAwait(false);
+
+            if (result.RateLimited)
+            {
+                return result;
+            }
+
+            if (!string.IsNullOrEmpty(result.FilmAffinityId))
+            {
+                _cache.SetFilmAffinityId(cacheKey, result.FilmAffinityId);
+                _logger.LogInformation(
+                    "Resolved FilmAffinity ID {FilmAffinityId} via title search fallback for {Title} ({Year})",
+                    result.FilmAffinityId,
+                    primaryTitle,
+                    productionYear);
+                return result;
+            }
+
+            if (result.HadTransientError)
+            {
+                hadTransientError = true;
+            }
+        }
+
+        if (!hadTransientError)
+        {
+            _cache.SetFilmAffinityId(cacheKey, null);
+        }
+
+        return new FilmAffinitySearchResult(null, RateLimited: false, HadTransientError: hadTransientError);
+    }
+
     /// <inheritdoc />
     public void Dispose()
     {
         _throttleLock.Dispose();
+    }
+
+    private async Task<FilmAffinitySearchResult> ExecuteSearchQueryAsync(
+        string queryTitle,
+        string queryLanguage,
+        string primaryTitle,
+        string? originalTitle,
+        bool isSeries,
+        int? productionYear,
+        PluginConfiguration config,
+        CancellationToken cancellationToken)
+    {
+        var requestUri = FilmAffinitySearchParser.BuildSearchUri(queryTitle, queryLanguage);
+
+        for (var attempt = 0; attempt <= MaxRateLimitRetries; attempt++)
+        {
+            if (TryGetRemainingCooldown(out _))
+            {
+                return new FilmAffinitySearchResult(null, RateLimited: true, HadTransientError: true);
+            }
+
+            await WaitForThrottleAsync(config.ThrottleMs, cancellationToken).ConfigureAwait(false);
+
+            if (TryGetRemainingCooldown(out _))
+            {
+                return new FilmAffinitySearchResult(null, RateLimited: true, HadTransientError: true);
+            }
+
+            try
+            {
+                var client = _httpClientFactory.CreateClient(HttpClientName);
+                using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
+
+                if (!string.IsNullOrWhiteSpace(config.UserAgent))
+                {
+                    request.Headers.UserAgent.TryParseAdd(config.UserAgent);
+                }
+
+                if (!string.IsNullOrWhiteSpace(config.AuthHeaderName)
+                    && !string.IsNullOrWhiteSpace(config.AuthHeaderValue))
+                {
+                    request.Headers.TryAddWithoutValidation(config.AuthHeaderName, config.AuthHeaderValue);
+                }
+
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                var timeoutSeconds = Math.Clamp(config.RequestTimeoutSeconds, 1, 120);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+
+                using var response = await client.SendAsync(request, timeoutCts.Token).ConfigureAwait(false);
+                var body = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
+
+                if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                {
+                    if (attempt < MaxRateLimitRetries)
+                    {
+                        var retryDelay = GetRateLimitDelay(response, config.ThrottleMs, attempt);
+                        await ApplyBackoffAsync(retryDelay, cancellationToken).ConfigureAwait(false);
+                        _logger.LogWarning(
+                            "Rate limited (HTTP 429) during FilmAffinity search {RequestUri}. Backing off for {DelaySeconds:F1}s before retry {Attempt}/{MaxRetries}.",
+                            requestUri,
+                            retryDelay.TotalSeconds,
+                            attempt + 1,
+                            MaxRateLimitRetries);
+                        continue;
+                    }
+
+                    var cooldownMinutes = Math.Clamp(config.RateLimitCooldownMinutes, 0, 1440);
+                    if (cooldownMinutes > 0)
+                    {
+                        ActivateRateLimitCooldown(TimeSpan.FromMinutes(cooldownMinutes));
+                        _logger.LogWarning(
+                            "Rate limited (HTTP 429) during FilmAffinity search {RequestUri} after {MaxRetries} consecutive retries. Pausing FilmAffinity requests for {CooldownMinutes} minutes.",
+                            requestUri,
+                            MaxRateLimitRetries,
+                            cooldownMinutes);
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "Rate limited (HTTP 429) during FilmAffinity search {RequestUri} after {MaxRetries} consecutive retries.",
+                            requestUri,
+                            MaxRateLimitRetries);
+                    }
+
+                    return new FilmAffinitySearchResult(null, RateLimited: true, HadTransientError: true);
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    if (FilmAffinityScoreParser.IsCloudflareBlocked(response, body))
+                    {
+                        _logger.LogWarning(
+                            "Cloudflare protection blocked FilmAffinity search request {RequestUri} (HTTP {StatusCode}).",
+                            requestUri,
+                            (int)response.StatusCode);
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "FilmAffinity search endpoint returned HTTP {StatusCode} for {QueryTitle} ({RequestUri})",
+                            (int)response.StatusCode,
+                            queryTitle,
+                            requestUri);
+                    }
+
+                    return new FilmAffinitySearchResult(null, RateLimited: false, HadTransientError: true);
+                }
+
+                if (FilmAffinityScoreParser.IsCloudflareBlocked(response, body))
+                {
+                    _logger.LogWarning(
+                        "Cloudflare protection blocked FilmAffinity search request {RequestUri} (HTTP {StatusCode}).",
+                        requestUri,
+                        (int)response.StatusCode);
+                    return new FilmAffinitySearchResult(null, RateLimited: false, HadTransientError: true);
+                }
+
+                var candidates = FilmAffinitySearchParser.ParseCandidates(body, response.RequestMessage?.RequestUri);
+                var matchedId = FilmAffinitySearchParser.SelectBestMatch(
+                    candidates,
+                    primaryTitle,
+                    originalTitle,
+                    isSeries,
+                    productionYear);
+
+                return new FilmAffinitySearchResult(matchedId, RateLimited: false, HadTransientError: false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Failed to search FilmAffinity for {QueryTitle} ({RequestUri})",
+                    queryTitle,
+                    requestUri);
+                return new FilmAffinitySearchResult(null, RateLimited: false, HadTransientError: true);
+            }
+        }
+
+        return new FilmAffinitySearchResult(null, RateLimited: true, HadTransientError: true);
     }
 
     private static bool MeetsMinVotes(FilmAffinityScore score, int minVotes)

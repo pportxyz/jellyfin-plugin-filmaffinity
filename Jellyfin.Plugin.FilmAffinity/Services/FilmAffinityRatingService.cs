@@ -60,23 +60,77 @@ public class FilmAffinityRatingService
         int? productionYear,
         CancellationToken cancellationToken)
     {
+        var result = await LookupDetailedAsync(
+            providerIds,
+            isSeries,
+            productionYear,
+            title: null,
+            originalTitle: null,
+            cancellationToken).ConfigureAwait(false);
+        return (result.FilmAffinityId, result.Score, result.RateLimited);
+    }
+
+    /// <summary>
+    /// Resolves the FilmAffinity ID (via Wikidata P480 with optional FilmAffinity title search fallback)
+    /// and fetches the corresponding score along with rate-limit and transient-error status.
+    /// </summary>
+    /// <param name="providerIds">Existing provider IDs on the item (IMDb, TMDb, FilmAffinity).</param>
+    /// <param name="isSeries"><c>true</c> for TV series; <c>false</c> for movies.</param>
+    /// <param name="productionYear">Optional production year.</param>
+    /// <param name="title">Optional item title for FilmAffinity search fallback.</param>
+    /// <param name="originalTitle">Optional original title for FilmAffinity search fallback.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A <see cref="FilmAffinityLookupResult"/> describing the resolved ID, score, and error flags.</returns>
+    public async Task<FilmAffinityLookupResult> LookupDetailedAsync(
+        IReadOnlyDictionary<string, string>? providerIds,
+        bool isSeries,
+        int? productionYear,
+        string? title,
+        string? originalTitle,
+        CancellationToken cancellationToken)
+    {
         if (_scoreClient.IsInRateLimitCooldown)
         {
-            return (null, null, true);
+            return new FilmAffinityLookupResult(null, null, RateLimited: true, HadTransientError: false);
         }
 
-        var filmAffinityId = await _resolver.ResolveAsync(providerIds, isSeries, cancellationToken)
+        var wikidataResult = await _resolver.ResolveWithStatusAsync(providerIds, isSeries, cancellationToken)
             .ConfigureAwait(false);
+        var filmAffinityId = wikidataResult.FilmAffinityId;
+        var hadTransientError = wikidataResult.HadTransientError;
+
+        if (string.IsNullOrEmpty(filmAffinityId)
+            && (!string.IsNullOrWhiteSpace(title) || !string.IsNullOrWhiteSpace(originalTitle)))
+        {
+            var searchResult = await _scoreClient.SearchFilmAffinityIdAsync(
+                title,
+                originalTitle,
+                isSeries,
+                productionYear,
+                cancellationToken).ConfigureAwait(false);
+
+            if (searchResult.RateLimited)
+            {
+                return new FilmAffinityLookupResult(null, null, RateLimited: true, HadTransientError: true);
+            }
+
+            filmAffinityId = searchResult.FilmAffinityId;
+            hadTransientError |= searchResult.HadTransientError;
+        }
 
         if (string.IsNullOrEmpty(filmAffinityId))
         {
-            return (null, null, false);
+            return new FilmAffinityLookupResult(null, null, RateLimited: false, HadTransientError: hadTransientError);
         }
 
         var fetchResult = await _scoreClient.FetchScoreAsync(filmAffinityId, productionYear, cancellationToken)
             .ConfigureAwait(false);
 
-        return (filmAffinityId, fetchResult.Score, fetchResult.RateLimited);
+        return new FilmAffinityLookupResult(
+            filmAffinityId,
+            fetchResult.Score,
+            fetchResult.RateLimited,
+            HadTransientError: false);
     }
 
     /// <summary>
