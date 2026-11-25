@@ -101,4 +101,23 @@ public class FilmAffinityScoreParserTests
         using var response = new HttpResponseMessage(HttpStatusCode.OK);
         Assert.False(FilmAffinityScoreParser.IsCloudflareBlocked(response, """{"rating": 8.2}"""));
     }
+
+    [Fact]
+    public void IsCloudflareBlocked_OkResponseWithPassiveJsdScript_ReturnsFalse()
+    {
+        using var response = new HttpResponseMessage(HttpStatusCode.OK);
+        response.Headers.Add("cf-ray", "a6035ee40d500bf3-MAD");
+        var html = """<html><body><p>No results</p><script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script></body></html>""";
+
+        Assert.False(FilmAffinityScoreParser.IsCloudflareBlocked(response, html));
+    }
+
+    [Fact]
+    public void IsCloudflareBlocked_ActiveChallengePlatformOrchestrator_ReturnsTrue()
+    {
+        using var response = new HttpResponseMessage(HttpStatusCode.OK);
+        var html = """<html><head><script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script></head></html>""";
+
+        Assert.True(FilmAffinityScoreParser.IsCloudflareBlocked(response, html));
+    }
 }

@@ -317,6 +317,55 @@ public class FilmAffinitySearchFallbackTests
         }
     }
 
+    [Fact]
+    public async Task SearchFilmAffinityId_Http200WithPassiveCloudflareJsdScript_ParsesMatchAndEmptyResultsCleanly()
+    {
+        var handler = new StubHttpMessageHandler(req =>
+        {
+            var html = req.RequestUri!.Query.Contains("Mayday", StringComparison.OrdinalIgnoreCase)
+                ? """
+                  <html><body>
+                    <div class="row movie-card movie-card-1" data-movie-id="123456">
+                      <div class="fs-6 mc-title">
+                        <a class="d-none d-md-inline-block" href="https://www.filmaffinity.com/es/film123456.html">Mayday</a>
+                      </div>
+                      <span class="mc-year ms-1">2021</span>
+                    </div>
+                    <script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script>
+                  </body></html>
+                  """
+                : """
+                  <html><body>
+                    <div class="no-results">No results</div>
+                    <script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script>
+                  </body></html>
+                  """;
+
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(html, Encoding.UTF8, "text/html")
+            };
+            response.Headers.Add("cf-ray", "a6035ee40d500bf3-MAD");
+            return response;
+        });
+
+        using var memoryCache = new MemoryCache(new MemoryCacheOptions());
+        var cache = new FilmAffinityCacheService(memoryCache);
+        using var scoreClient = new FilmAffinityScoreClient(
+            new SingleHandlerHttpClientFactory(handler),
+            cache,
+            NullLogger<FilmAffinityScoreClient>.Instance,
+            () => new PluginConfiguration { ThrottleMs = 0 });
+
+        var matched = await scoreClient.SearchFilmAffinityIdAsync("Mayday", null, isSeries: false, 2021, CancellationToken.None);
+        Assert.Equal("123456", matched.FilmAffinityId);
+        Assert.False(matched.HadTransientError);
+
+        var unmatched = await scoreClient.SearchFilmAffinityIdAsync("Nonexistent Title", null, isSeries: false, 2021, CancellationToken.None);
+        Assert.Null(unmatched.FilmAffinityId);
+        Assert.False(unmatched.HadTransientError);
+    }
+
     private sealed class StubHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> responder) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)

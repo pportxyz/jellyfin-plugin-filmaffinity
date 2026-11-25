@@ -525,7 +525,8 @@ public sealed class FilmAffinityScoreClient : IDisposable
                     return new FilmAffinitySearchResult(null, RateLimited: false, HadTransientError: true);
                 }
 
-                if (FilmAffinityScoreParser.IsCloudflareBlocked(response, body))
+                var candidates = FilmAffinitySearchParser.ParseCandidates(body, response.RequestMessage?.RequestUri);
+                if (candidates.Count == 0 && FilmAffinityScoreParser.IsCloudflareBlocked(response, body))
                 {
                     _logger.LogWarning(
                         "Cloudflare protection blocked FilmAffinity search request {RequestUri} (HTTP {StatusCode}).",
@@ -534,7 +535,6 @@ public sealed class FilmAffinityScoreClient : IDisposable
                     return new FilmAffinitySearchResult(null, RateLimited: false, HadTransientError: true);
                 }
 
-                var candidates = FilmAffinitySearchParser.ParseCandidates(body, response.RequestMessage?.RequestUri);
                 var matchedId = FilmAffinitySearchParser.SelectBestMatch(
                     candidates,
                     primaryTitle,

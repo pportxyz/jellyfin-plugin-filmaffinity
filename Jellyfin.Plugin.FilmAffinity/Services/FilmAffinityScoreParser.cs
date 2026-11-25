@@ -80,10 +80,16 @@ public static partial class FilmAffinityScoreParser
             }
         }
 
+        if (response.Headers.Contains("cf-mitigated"))
+        {
+            return true;
+        }
+
         if (!string.IsNullOrEmpty(body)
             && (body.Contains("Just a moment...", StringComparison.OrdinalIgnoreCase)
+                || body.Contains("Attention Required! | Cloudflare", StringComparison.OrdinalIgnoreCase)
                 || body.Contains("cf-browser-verification", StringComparison.OrdinalIgnoreCase)
-                || body.Contains("challenge-platform", StringComparison.OrdinalIgnoreCase)))
+                || body.Contains("/cdn-cgi/challenge-platform/h/", StringComparison.OrdinalIgnoreCase)))
         {
             return true;
         }
